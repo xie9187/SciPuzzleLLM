@@ -150,7 +150,7 @@ class TableState(object):
 
     def fill_elem_posi(self, actions):
         for elem, row, col in actions:
-            self.elem_df.loc[elem, ['col', 'row']] = [row, col]
+            self.elem_df.loc[elem, ['row', 'col']] = [row, col]
 
     def append_new_elem(self, elems):
         for elem_attr in elems:
@@ -409,7 +409,7 @@ if __name__ == '__main__':
     }
 
     history = History()
-    logger = Logger(join(data_path, 'logs'))
+    logger = Logger(join(data_path, 'logs', 'new_experiment'))
     max_iter = 1
     max_retries = 3
     try:
