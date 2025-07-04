@@ -372,7 +372,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     n_matched = matched_df.shape[0]
     matched_elem_str = table.state_as_long_str(matched_df)
     match_rate = n_matched / new_elem_df.shape[0]
-
+    print_and_enter(f'Match Rate: {match_rate}')
     eval_result = in_agent.evaluate_hypothesis(state, hypothesis, matched_elem_str, match_rate)
     evaluation = eval_result['evaluation']
     decision = eval_result['decision']
@@ -390,7 +390,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
 
 if __name__ == '__main__':
     
-    data_path = r'D:\Data\SciPuzzleLLM'
+    data_path = r'D:\data\SciPuzzleLLM'
 
     # make table data and object
     table_file = join(data_path, 'PeriodicTable.csv')
@@ -418,6 +418,10 @@ if __name__ == '__main__':
     }
 
     history = History()
+    
+    # Optionally load previous records from a specific log
+    # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-11-51-12'), iteration=1)
+    
     logger = Logger(join(data_path, 'logs'))
     max_iter = 2
     max_retries = 3

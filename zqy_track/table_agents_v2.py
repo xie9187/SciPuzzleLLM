@@ -1,6 +1,7 @@
 import openai
 import time
 import re
+import json
 
 class Agent(object):
 
@@ -71,7 +72,7 @@ class AbductionAgent(Agent):
 
         以往的历史记录（包含假设、评价与预测元素成功匹配率）为：
         <history>
-        {history}
+        {json.dumps(history.records[-1])}
         </history>
 
         你的回复必须严格遵循以下格式：
@@ -154,7 +155,7 @@ class AbductionAgent(Agent):
 
         以往的历史记录（包含假设、评价与预测元素成功匹配率）为：
         <history>
-        {history}
+        {json.dumps(history.records[-1])} 
         </history>
 
         你的回复必须严格遵循以下格式：
