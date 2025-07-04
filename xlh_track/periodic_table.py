@@ -211,14 +211,14 @@ class TableState(object):
         
         return '\n'.join(table_lines)
 
-    def find_matched_elements(self, df1, df2, tolerance=1.0):
+    def find_matched_elements(self, df1, df2, tolerance=5.0):
         """
         通过行循环匹配两个 DataFrame 的所有共有属性列（除了 row 和 col）
         
         参数:
             df1: 待匹配的 DataFrame（可能包含 row 和 col）
             df2: 目标 DataFrame
-            tolerance: Attribute1 允许的误差范围（默认 1.0）
+            tolerance: Attribute1 允许的误差范围（默认 5.0）
         
         返回:
             匹配成功的 df1 的子集
@@ -382,6 +382,8 @@ def hypo_gen_and_eval(table, agents, history, logger, max_retries=2):
 if __name__ == '__main__':
     
     from config import data_path
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
 
     # make table data and object
     table_file = join(data_path, 'PeriodicTable.csv')
