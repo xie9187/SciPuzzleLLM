@@ -92,14 +92,14 @@ def create_periodic_table_plot(df, attribute, save_path=None, key_idx=0):
     if save_path is None:
         plt.show()
     else:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
 
 
 if __name__ == '__main__':
     from os.path import join
 
     # 示例数据 (替换为你的实际数据)
-    log_path = r'D:\Data\SciLLM\logs\2025-07-01-17-03-23'
+    log_path = r'D:\Data\SciLLM\logs\new_experiment\2025-07-03-22-55-51'
     df = pd.read_csv(join(log_path, 'table.csv'), index_col='Element')
 
     matched_df = df.copy().drop(df.index)

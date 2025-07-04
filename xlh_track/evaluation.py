@@ -36,6 +36,7 @@ def evaluate(exp_path):
 
 if __name__ == '__main__':
 
-	exp_path = r'D:\Data\SciLLM\logs\20250703'
+	from config import data_path
+	exp_path = join(data_path, 'logs', 'new_experiment')
 	evaluate(exp_path)
 	

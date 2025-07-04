@@ -381,7 +381,7 @@ def hypo_gen_and_eval(table, agents, history, logger, max_retries=2):
 
 if __name__ == '__main__':
     
-    data_path = r'D:\Data\SciLLM'
+    from config import data_path
 
     # make table data and object
     table_file = join(data_path, 'PeriodicTable.csv')
