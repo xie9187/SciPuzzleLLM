@@ -275,8 +275,9 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
 
     # abduction
     print(logger.new_part('Abduction Process'))
+    ab_agent = agents['ab_agent']
     if decision == 'C':
-        ab_agent = agents['ab_agent']
+        
         attribute_result = ab_agent.select_main_attribute(state, history)
         main_attr = attribute_result['attribute']
         ascending = attribute_result['ascending'].lower() == 'true'
@@ -420,7 +421,7 @@ if __name__ == '__main__':
     history = History()
     
     # Optionally load previous records from a specific log
-    # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-11-51-12'), iteration=1)
+    history.load_records_from_log(join(data_path, 'logs', '2025-07-07-14-42-24'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
     max_iter = 2

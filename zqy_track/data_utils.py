@@ -2,8 +2,10 @@ import os
 import sys
 import re
 from datetime import datetime
+import json
 from os.path import join
 from viz_utils import create_periodic_table_plot
+from table_agents_v2 import RecordAgent
 
 def print_and_enter(content):
     print(content)
@@ -145,11 +147,25 @@ class History(object):
                 'match_rate': match_rate,
                 'attribute': attribute,
                 'ascending': ascending,
-                'iteration': iter_num
             }
             records.append(record)
         self.records = records
         return records
+    
+    def select_record(self):
+        if len(self.records) < 2:
+            return json.dumps(self.records[-1], ensure_ascii=False)
+        else:
+            max_match_rate = max([record['match_rate'] for record in self.records[1:]])
+            max_match_rate_record = [record for record in self.records[1:] if record['match_rate'] == max_match_rate]
+            last_record = [self.records[-1]]
+            merged_records = max_match_rate_record + last_record
+            record_agent = RecordAgent()
+            json_response = record_agent.merge_records(merged_records)
+            return json_response
+            
+
+
     
 
 def execute_function(code_str, func_name, df):
