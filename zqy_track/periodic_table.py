@@ -8,6 +8,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 from table_agents_v2 import *
 from data_utils import *
+from code_executor import enhanced_code_execution
 
 def generate_table():
     # 初始化数据列表
@@ -297,25 +298,32 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
 
 
 
-    success = False
-    retry_count = 0
-    while not success and retry_count < max_retries:
-        try:
-            hypothesis_result = ab_agent.generate_hypothesis(sorted_state, main_attr, history)
-            hypothesis = hypothesis_result['hypothesis']
-            code = hypothesis_result['code']
-            func_name = hypothesis_result['func_name']
-            namespace = {}
-            exec(code, namespace)
-            function = namespace[func_name]
-            actions = function(table.elem_df.copy()) 
-            success = True
-        except Exception as e:
-            retry_count += 1
-            print(f"执行代码时出错，重新尝试 {retry_count}/{max_retries} ...\n")
-            if retry_count >= max_retries:
-                print("已达到最大重试次数，无法生成可执行的代码。")
-                raise Exception("无法生成可执行的代码")
+    hypothesis_result = ab_agent.generate_hypothesis(sorted_state, main_attr, history)
+
+
+    hypothesis = hypothesis_result['hypothesis']
+    code = hypothesis_result['code']
+    func_name = hypothesis_result['func_name']
+    
+    # 使用增强的代码执行系统
+
+    execution_result = enhanced_code_execution(
+        code, func_name, table.elem_df.copy(), hypothesis, max_retries
+    )
+    
+    if not execution_result['success']:
+        print_and_enter(f"代码执行失败: {execution_result['error']}")
+        raise Exception(f"无法生成可执行的代码: {execution_result['error']}")
+    
+    actions = execution_result['result']
+    
+    # 显示执行详情
+    print_and_enter(f"✅ 代码执行成功，尝试次数: {execution_result['attempts']}")
+    if execution_result.get('test_result'):
+        print_and_enter(f"📋 单元测试结果: {execution_result['test_result']['overall_passed']}")
+
+    
+    success = True
 
     print('Reasoning:')
     print_and_enter(hypothesis_result["reasoning"])
@@ -331,25 +339,30 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print(logger.new_part('Deduction Process'))
     de_agent = agents['de_agent']
 
-    success = False
-    retry_count = 0
-    while not success and retry_count < max_retries:
-        try:
-            pred_result = de_agent.predict_elements(state, hypothesis, code, n=10)
-            new_elems_posi = pred_result['new_elems_posi']
-            inverse_code = pred_result['inverse_code']
-            func_name = pred_result['func_name']
-            namespace = {}
-            exec(inverse_code, namespace)
-            function = namespace[func_name]
-            new_elems = function(new_elems_posi, table.elem_df.copy()) 
-            success = True
-        except Exception as e:
-            retry_count += 1
-            print(f"执行代码时出错，重新尝试 {retry_count}/{max_retries} ...\n")
-            if retry_count >= max_retries:
-                print("已达到最大重试次数，无法生成可执行的代码。")
-                raise Exception("无法生成可执行的代码")
+    pred_result = de_agent.predict_elements(state, hypothesis, code, n=10)
+    new_elems_posi = pred_result['new_elems_posi']
+    inverse_code = pred_result['inverse_code']
+    func_name = pred_result['func_name']
+    
+    # 使用增强的代码执行系统
+    execution_result = enhanced_code_execution(
+        inverse_code, func_name, (new_elems_posi, table.elem_df.copy()), 
+        f"根据元素位置预测元素属性，符合假设: {hypothesis}", max_retries
+    )
+    
+    if not execution_result['success']:
+        print(f"反向代码执行失败: {execution_result['error']}")
+        raise Exception(f"无法生成可执行的反向代码: {execution_result['error']}")
+    
+    new_elems = execution_result['result']
+    
+    # 显示执行详情
+    print(f"✅ 反向代码执行成功，尝试次数: {execution_result['attempts']}")
+    if execution_result.get('test_result'):
+        print(f"📋 单元测试结果: {execution_result['test_result']['overall_passed']}")
+
+    
+    success = True
 
     print('Reasoning:')
     print_and_enter(pred_result["reasoning"])
@@ -424,7 +437,7 @@ if __name__ == '__main__':
     history.load_records_from_log(join(data_path, 'logs', '2025-07-07-14-42-24'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
-    max_iter = 2
+    max_iter = 5
     max_retries = 3
     decision = 'C'
     try:
