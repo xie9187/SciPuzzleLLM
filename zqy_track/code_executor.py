@@ -12,6 +12,7 @@ from contextlib import redirect_stdout, redirect_stderr
 import tempfile
 import os
 from table_agents_v2 import Agent
+import subprocess
 
 # 确保Windows上的multiprocessing正常工作
 if __name__ == '__main__':
@@ -99,31 +100,40 @@ class CodeExecutorService:
                 'traceback': traceback.format_exc()
             })
     
-    def execute_with_debug_and_test(self, code: str, func_name: str, input_data: Any, 
-                                   hypothesis: str, max_retries: int = 3) -> Dict:
-        """执行代码，如果出错则使用大语言模型进行调试和测试"""
-        
+    def execute_with_debug_and_test(
+        self,
+        code: str,
+        func_name: str,
+        input_data: Any,
+        hypothesis: str,
+        max_retries: int = 3
+    ) -> Dict:
+        """
+        执行代码，如果出错则使用大语言模型进行调试和测试
+        """
         original_code = code
         current_code = code
         test_result = {'overall_passed': False}
+        execution_result = None
+
         for attempt in range(max_retries + 1):
-            print(f"\n{'='*50}")
+            print(f"\n{'=' * 50}")
             print(f"代码执行尝试 {attempt + 1}/{max_retries + 1}")
-            print(f"{'='*50}")
-            
+            print(f"{'=' * 50}")
+
             # 1. 尝试执行代码
             execution_result = self.execute_code_in_process(current_code, func_name, input_data)
-            
-            if execution_result['success']:
+
+            if execution_result.get('success'):
                 print("✅ 代码执行成功!")
-                
+
                 # 2. 生成和运行单元测试
-                
                 test_result = self.test_agent.generate_and_run_tests(
                         current_code, func_name, input_data, execution_result['result'], hypothesis
                 )
-                
-                if test_result['test_execution']['all_passed'] == True:
+
+                if test_result.get('test_execution', {}).get('all_passed') is True:
+                    print("✅ 单元测试通过!")
                     return {
                         'success': True,
                         'result': execution_result['result'],
@@ -132,36 +142,58 @@ class CodeExecutorService:
                         'test_result': test_result,
                         'attempts': attempt + 1
                     }
-                
-            
-            if attempt < max_retries:
-                # 4. 使用调试代理修复代码
-                if execution_result['success'] == False:
-                    print(f"❌ 代码执行失败: {execution_result['error']}")
-                    debug_result = self.debug_agent.debug_error_code(
-                    current_code, func_name, execution_result['error'], 
-                    execution_result.get('traceback', ''), hypothesis
-                )
-                if test_result['test_execution']['all_passed'] == False:
-                    print(f"❌ 单元测试失败: {test_result['test_execution']['test_summary']}")
-                    debug_result = self.debug_agent.debug_unittest_code(
-                    current_code, func_name, test_result['test_generation']['test_strategy'], 
-                    test_result['test_execution']['stdout'], hypothesis)
-                
 
-                
-                if debug_result['success']:
+            # 3. 如果未通过，尝试调试
+            debug_result = None
+            if attempt < max_retries:
+                if not execution_result.get('success'):
+                    print(f"❌ 代码执行失败: {execution_result.get('error')}")
+                    debug_result = self.debug_agent.debug_error_code(
+                        current_code,
+                        func_name,
+                        execution_result.get('error', ''),
+                        execution_result.get('traceback', ''),
+                        hypothesis
+                    )
+                elif test_result.get('test_execution', {}).get('all_passed') is False:
+                    print(f"❌ 单元测试失败: {test_result['test_execution'].get('test_summary', '')}")
+                    debug_result = self.debug_agent.debug_unittest_code(
+                        current_code,
+                        func_name,
+                        test_result.get('test_generation', {}).get('test_strategy', ''),
+                        test_result.get('test_execution', {}).get('stdout', ''),
+                        hypothesis
+                    )
+
+                if debug_result and debug_result.get('success'):
                     current_code = debug_result['fixed_code']
-                    print(f"🔧 调试代理已修复代码，准备重新执行...")
-                else:
-                    print(f"❌ 调试代理无法修复代码: {debug_result['error']}")
-                    break
+                    test_result = self.test_agent.run_test_cases(
+                        current_code, test_result.get('test_generation', {}).get('test_code', '')
+                    )
+                    if test_result.get('all_passed') is True:
+                        print("🔧 调试代理已修复代码，准备重新执行...")
+                        return {
+                            'success': True,
+                            'result': execution_result['result'],
+                            'code': current_code,
+                            'execution_details': execution_result,
+                            'test_result': test_result,
+                            'attempts': attempt + 1
+                        }
+                    else:
+                        print(f"❌ 调试代理修复后的代码单元测试失败: {test_result.get('test_summary', '')}")
+                        continue
+                elif debug_result:
+                    print(f"❌ 调试代理无法修复代码: {debug_result.get('error')}")
             else:
-                print(f"❌ 达到最大重试次数，代码执行失败")
-        
+                print("❌ 达到最大重试次数，代码执行失败")
+        if execution_result.get('error') is None:
+            success = True
+        else:
+            success = False
         return {
-            'success': False,
-            'error': execution_result['error'],
+            'success': success,
+            'error': execution_result.get('error') if execution_result else '未知错误',
             'original_code': original_code,
             'last_attempted_code': current_code,
             'attempts': max_retries + 1
@@ -395,11 +427,11 @@ class TestAgent(Agent):
         </function_name>
 
         <sample_input>
-        {str(input_data)[:1000]}...
+        {str(input_data)[:15]}...
         </sample_input>
 
         <sample_output>
-        {str(execution_result)[:1000]}...
+        {str(execution_result)[:15]}...
         </sample_output>
 
         <hypothesis>
@@ -420,11 +452,6 @@ class TestAgent(Agent):
         </test_strategy>
 
         <test_code>
-        import unittest
-        import pandas as pd
-        
-        # 在此处包含被测试的代码
-        {code}
         
         class TestGeneratedFunction(unittest.TestCase):
             # 生成的测试用例
@@ -435,7 +462,7 @@ class TestAgent(Agent):
             suite = loader.loadTestsFromTestCase(DemoTest)
             runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
             result = runner.run(suite)
-            </test_code>
+        </test_code>
         """
         
         prompt_msgs = [
@@ -475,8 +502,18 @@ class TestAgent(Agent):
         
         try:
             # 创建临时文件来运行测试
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            code = ''
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+                f.write('# -*- coding: utf-8 -*-\n')
+                code += '# -*- coding: utf-8 -*-\n'
+                f.write('import unittest\n')
+                code += 'import unittest\n'
+                f.write('import pandas as pd\n')
+                code += 'import pandas as pd\n'
+                f.write(original_code+'\n')
+                code += original_code+'\n'
                 f.write(test_code)
+                code += test_code
                 test_file = f.name
             
             # 捕获测试输出
@@ -486,14 +523,14 @@ class TestAgent(Agent):
             with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
                 # 在独立的命名空间中运行测试
                 namespace = {"__name__": "__main__"}
-                exec(test_code, namespace)
+                exec(code, namespace)
 
             # 清理临时文件
             os.unlink(test_file)
             
             stdout_content = stdout_buffer.getvalue()
             stderr_content = stderr_buffer.getvalue()
-            
+            print(stdout_content)
             # 简单分析测试结果
             if 'FAILED' in stdout_content or 'ERROR' in stdout_content:
                 all_passed = False
