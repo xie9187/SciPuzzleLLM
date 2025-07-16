@@ -21,7 +21,7 @@ if __name__ == '__main__':
 class CodeExecutorService:
     """独立进程代码执行服务"""
     
-    def __init__(self, timeout=30):
+    def __init__(self, timeout=120):
         self.timeout = timeout
         self.debug_agent = DebugAgent()
         self.test_agent = TestAgent()
@@ -132,8 +132,7 @@ class CodeExecutorService:
                         current_code, func_name, input_data, execution_result['result'], hypothesis
                 )
 
-                if test_result.get('test_execution', {}).get('all_passed') is True:
-                    print("✅ 单元测试通过!")
+                if test_result.get('overall_passed') is True:
                     return {
                         'success': True,
                         'result': execution_result['result'],
@@ -155,7 +154,7 @@ class CodeExecutorService:
                         execution_result.get('traceback', ''),
                         hypothesis
                     )
-                elif test_result.get('test_execution', {}).get('all_passed') is False:
+                elif test_result.get('overall_passed') is False:
                     print(f"❌ 单元测试失败: {test_result['test_execution'].get('test_summary', '')}")
                     debug_result = self.debug_agent.debug_unittest_code(
                         current_code,
@@ -167,33 +166,45 @@ class CodeExecutorService:
 
                 if debug_result and debug_result.get('success'):
                     current_code = debug_result['fixed_code']
-                    test_result = self.test_agent.run_test_cases(
+                    test_execution_result = self.test_agent.run_test_cases(
                         current_code, test_result.get('test_generation', {}).get('test_code', '')
                     )
-                    if test_result.get('all_passed') is True:
+                    if test_execution_result.get('all_passed') is True:
                         print("🔧 调试代理已修复代码，准备重新执行...")
+                        # 构造与generate_and_run_tests相同的结构
+                        fixed_test_result = {
+                            'success': True,
+                            'test_generation': test_result.get('test_generation', {}),
+                            'test_execution': test_execution_result,
+                            'overall_passed': test_execution_result['success'] and test_execution_result['all_passed']
+                        }
                         return {
                             'success': True,
                             'result': execution_result['result'],
                             'code': current_code,
                             'execution_details': execution_result,
-                            'test_result': test_result,
+                            'test_result': fixed_test_result,
                             'attempts': attempt + 1
                         }
                     else:
-                        print(f"❌ 调试代理修复后的代码单元测试失败: {test_result.get('test_summary', '')}")
+                        print(f"❌ 调试代理修复后的代码单元测试失败: {test_execution_result.get('test_summary', '')}")
+
                         continue
                 elif debug_result:
                     print(f"❌ 调试代理无法修复代码: {debug_result.get('error')}")
             else:
                 print("❌ 达到最大重试次数，代码执行失败")
-        if execution_result.get('error') is None:
+        if execution_result and execution_result.get('success'):
             success = True
+            result = execution_result.get('result')
+            
         else:
             success = False
+            result = None
         return {
             'success': success,
-            'error': execution_result.get('error') if execution_result else '未知错误',
+            'result': result,
+            'error': execution_result.get('error') if execution_result else '单元测试未通过，继续',
             'original_code': original_code,
             'last_attempted_code': current_code,
             'attempts': max_retries + 1
@@ -250,7 +261,6 @@ class DebugAgent(Agent):
         2. 保持函数的输入输出接口不变
         3. 符合hypothesis中描述的功能要求
         4. 修复所有语法和逻辑错误
-        5. 确保返回格式为[(elem_name, row, col), ...]的列表
 
         请按以下格式回复：
 
@@ -310,6 +320,7 @@ class DebugAgent(Agent):
         {func_name}
         </function_name>
 
+        
         <test_strategy>
         {test_strategy}
         </test_strategy>
@@ -328,7 +339,7 @@ class DebugAgent(Agent):
         2. 保持函数的输入输出接口不变
         3. 符合hypothesis中描述的功能要求
         4. 修复单元测试失败的原因
-        5. 确保返回格式为[(elem_name, row, col), ...]的列表
+        5. 使用utf-8编码
 
         请按以下格式回复：
 
@@ -438,19 +449,24 @@ class TestAgent(Agent):
         {hypothesis}
         </hypothesis>
 
+        <test_requirements>
+        1. 不要import任何package.
+        2. 使用utf-8编码
+        </test_requirements>
+
         请生成测试用例来验证：
         1. 函数的基本功能是否正确
-        2. 输出格式是否符合要求[(elem_name, row, col), ...]
-        3. 所有row和col都是正整数
-        4. 没有位置重叠
-        5. 结果是否符合hypothesis中描述的规律
+        2. 所有row和col都是正整数
+        3. 没有位置重叠
+        4. 结果是否符合hypothesis中描述的规律
 
         请按以下格式回复：
 
         <test_strategy>
-        测试策略和测试用例设计思路
+        测试策略和测试用例设计思路.
         </test_strategy>
 
+        
         <test_code>
         
         class TestGeneratedFunction(unittest.TestCase):
@@ -460,7 +476,7 @@ class TestAgent(Agent):
             # 使用TestRunner来控制输出流
             loader = unittest.TestLoader()
             suite = loader.loadTestsFromTestCase(DemoTest)
-            runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
+            runner = unittest.TextTestRunner(verbosity=2)
             result = runner.run(suite)
         </test_code>
         """
@@ -508,8 +524,6 @@ class TestAgent(Agent):
                 code += '# -*- coding: utf-8 -*-\n'
                 f.write('import unittest\n')
                 code += 'import unittest\n'
-                f.write('import pandas as pd\n')
-                code += 'import pandas as pd\n'
                 f.write(original_code+'\n')
                 code += original_code+'\n'
                 f.write(test_code)
@@ -517,30 +531,29 @@ class TestAgent(Agent):
                 test_file = f.name
             
             # 捕获测试输出
-            stdout_buffer = io.StringIO()
-            stderr_buffer = io.StringIO()
             
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                # 在独立的命名空间中运行测试
-                namespace = {"__name__": "__main__"}
-                exec(code, namespace)
-
+            # 使用subprocess运行测试代码
+            process = subprocess.Popen(
+                ['python', test_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout_content, stderr_content = process.communicate()
+            print(stderr_content)
             # 清理临时文件
-            os.unlink(test_file)
+            # os.unlink(test_file)
             
-            stdout_content = stdout_buffer.getvalue()
-            stderr_content = stderr_buffer.getvalue()
-            print(stdout_content)
             # 简单分析测试结果
-            if 'FAILED' in stdout_content or 'ERROR' in stdout_content:
+            if 'FAILED' in stderr_content or 'ERROR' in stderr_content:
                 all_passed = False
                 test_summary = "部分测试失败"
-            elif 'OK' in stdout_content:
+            elif 'OK' in stderr_content:
                 all_passed = True
                 test_summary = "所有测试通过"
             else:
                 all_passed = False
-                test_summary = "测试结果不明确"
+                test_summary = "代码未执行成功"
             
             return {
                 'success': True,

@@ -2,13 +2,19 @@ import openai
 import time
 import re
 import json
+import os
+import getpass
 
 class Agent(object):
 
     def __init__(self):
         super(Agent, self).__init__()
-        self.key = "sk-LnvCAgeBU7bBdCGuCdEdE5AdB65b409fBeEd5c61EdE741B9" #我的key
-        self.url = "https://api.bltcy.ai/v1"
+        if not os.environ.get("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = getpass.getpass("Enter API key for OpenAI: ")
+        if not os.environ.get("BASE_URL"):
+            os.environ["BASE_URL"] = getpass.getpass("Enter BASE URL: ")
+        self.key = os.environ.get("OPENAI_API_KEY") #我的key
+        self.url = os.environ.get("BASE_URL")
         self.model = 'deepseek-v3' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
 
     def get_LLM_response(self, prompt_msgs):    
@@ -138,7 +144,7 @@ class AbductionAgent(Agent):
         1. 输入: 
             current_df: DataFrame # 包含元素所有属性以及当前所在表格的行(row)和列(col)
         2. 输出：
-            results: [(elem_name, row, col), ...] # 所有元素位置的Python list
+            results: [(elem_name, row, col), ...] # 所有元素位置的Python list, rol 和 col 为正整数
         3. 注意导入函数所需的package
         """
 

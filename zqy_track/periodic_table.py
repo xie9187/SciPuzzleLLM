@@ -434,7 +434,7 @@ if __name__ == '__main__':
     history = History()
     
     # Optionally load previous records from a specific log
-    history.load_records_from_log(join(data_path, 'logs', '2025-07-07-14-42-24'), iteration=1)
+    history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
     max_iter = 5
@@ -469,6 +469,7 @@ if __name__ == '__main__':
 
         logger.log_table_as_csv(final_df)
         logger.log_table_as_img(final_df)
-
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
         logger.close()
