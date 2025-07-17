@@ -8,13 +8,13 @@ import pandas as pd
 from typing import Dict, List, Tuple, Any
 import sys
 import io
+import codecs
 from contextlib import redirect_stdout, redirect_stderr
 import tempfile
 import os
 from table_agents_v2 import Agent
 import subprocess
 
-# 确保Windows上的multiprocessing正常工作
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
 
@@ -62,6 +62,12 @@ class CodeExecutorService:
     def _execute_code_worker(self, code: str, func_name: str, input_data: Any, result_queue: multiprocessing.Queue):
         """工作进程中执行代码"""
         try:
+            
+            # 确保标准输出使用UTF-8编码
+            if sys.platform == 'win32':
+                sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+                sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+            
             # 捕获输出
             stdout_buffer = io.StringIO()
             stderr_buffer = io.StringIO()
@@ -339,7 +345,7 @@ class DebugAgent(Agent):
         2. 保持函数的输入输出接口不变
         3. 符合hypothesis中描述的功能要求
         4. 修复单元测试失败的原因
-        5. 使用utf-8编码
+        5. 使用utf-8编码，确保所有字符串处理都兼容Unicode
 
         请按以下格式回复：
 
@@ -452,6 +458,7 @@ class TestAgent(Agent):
         <test_requirements>
         1. 不要import任何package.
         2. 使用utf-8编码
+        3. 请用英文输出测试代码
         </test_requirements>
 
         请生成测试用例来验证：
@@ -470,10 +477,10 @@ class TestAgent(Agent):
         <test_code>
         
         class TestGeneratedFunction(unittest.TestCase):
-            # 生成的测试用例
+            # generate test cases here
             pass
         if __name__ == "__main__":
-            # 使用TestRunner来控制输出流
+            # use TestRunner to control output stream
             loader = unittest.TestLoader()
             suite = loader.loadTestsFromTestCase(DemoTest)
             runner = unittest.TextTestRunner(verbosity=2)
@@ -520,8 +527,8 @@ class TestAgent(Agent):
             # 创建临时文件来运行测试
             code = ''
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-                f.write('# -*- coding: utf-8 -*-\n')
-                code += '# -*- coding: utf-8 -*-\n'
+                f.write('# -*- coding: utf-8 -*-\n#!/usr/bin/env python3\n')
+                code += '# -*- coding: utf-8 -*-\n#!/usr/bin/env python3\n'
                 f.write('import unittest\n')
                 code += 'import unittest\n'
                 f.write(original_code+'\n')
@@ -537,10 +544,13 @@ class TestAgent(Agent):
                 ['python', test_file],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                encoding='utf-8'
             )
+
             stdout_content, stderr_content = process.communicate()
             print(stderr_content)
+            print(f'test_file: {test_file}')
             # 清理临时文件
             # os.unlink(test_file)
             

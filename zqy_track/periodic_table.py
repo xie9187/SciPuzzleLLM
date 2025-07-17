@@ -24,7 +24,7 @@ def generate_table():
 
     # 先只考虑使用前60个元素，降低难度
     n_elem = 60
-
+    
     # 随机选择10个测试集元素
     test = random.sample(range(n_elem), 10)
     
@@ -437,7 +437,7 @@ if __name__ == '__main__':
     history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
-    max_iter = 5
+    max_iter = 2
     max_retries = 3
     decision = 'C'
     try:
