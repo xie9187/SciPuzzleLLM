@@ -1,0 +1,8 @@
+openai
+pandas
+matplotlib
+seaborn
+numpy
+pymatgen
+scikit-learn
+gymnasium

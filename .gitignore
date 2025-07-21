@@ -5,3 +5,4 @@
 # 忽略__pycache__目录（Python 3的编译缓存）
 __pycache__/
 logs/
+data/
