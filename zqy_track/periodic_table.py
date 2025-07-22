@@ -339,7 +339,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print(logger.new_part('Deduction Process'))
     de_agent = agents['de_agent']
 
-    pred_result = de_agent.predict_elements(state, hypothesis, code, n=10)
+    pred_result = de_agent.predict_elements(state, hypothesis, code, history, n=10)
     new_elems_posi = pred_result['new_elems_posi']
     inverse_code = pred_result['inverse_code']
     func_name = pred_result['func_name']
@@ -398,7 +398,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print('decision:')
     print_and_enter(in_agent.options[decision])
 
-    history.update_records(hypothesis, evaluation, match_rate, main_attr, ascending)
+    history.update_records(hypothesis, evaluation, match_rate, main_attr, ascending, code, inverse_code)
 
     return table, history, decision, matched_df
 

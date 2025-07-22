@@ -228,7 +228,7 @@ class DeductionAgent(Agent):
         2. 以虚拟元素表格形式呈现的所有已被填入表格元素属性值
         """
 
-    def predict_elements(self, state, hypothesis, code, n=10):
+    def predict_elements(self, state, hypothesis, code, history,n=10):
 
         task = f"""
         1. 根据提供的虚拟元素周期律假设以及当前的元素周期表状态，提出{n}个最有可能的潜在未知元素，元素命名为NewElem1, NewElem2, ...
@@ -270,6 +270,11 @@ class DeductionAgent(Agent):
         <code>
         {code}
         </code>
+
+        已知逆函数为：
+        <inverse_code>
+        {history.records[-1]['deduction_code']}
+        </inverse_code>
 
         任务要求：
         <task>
@@ -428,7 +433,7 @@ class RecordAgent(Agent):
         你是一个假设总结评价专家，需要根据历史记录总结出最优假设。
         """
         self.history_introduction = """
-        包含一个或多个假设，每个假设包含假设、评价与预测元素成功匹配率，以及主属性、主属性是否升序。
+        包含一个或多个假设，每个假设包含假设、评价与预测元素成功匹配率，以及主属性、主属性是否升序，填表函数代码，逆函数代码。
         
         """
 
@@ -436,7 +441,7 @@ class RecordAgent(Agent):
         task = '''
         1. 根据提供的最优假设，以及最后的假设总结并优化假设。
         2. 假设尽可能清晰，便于后续转化为python代码。
-        3. 输出的格式与单个历史记录一致，包括假设、评价与预测元素成功匹配率，以及主属性、主属性是否升序。
+        3. 输出的格式与单个历史记录一致，包括假设、评价与预测元素成功匹配率，以及主属性、主属性是否升序, 填表函数代码，逆函数代码。
         '''
         user_prompt = f'''
         当前的历史记录为：

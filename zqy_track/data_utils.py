@@ -60,13 +60,15 @@ class History(object):
         super(History, self).__init__()
         self.records = ['']
 
-    def update_records(self, hypothesis, evaluation, match_rate, attribute=None, ascending=None):
+    def update_records(self, hypothesis, evaluation, match_rate, attribute=None, ascending=None, abuduction_code=None, deduction_code=None):
         self.records.append({
             'hypothesis': hypothesis, 
             'evaluation': evaluation, 
             'match_rate': match_rate,
             'attribute': attribute,
-            'ascending': ascending
+            'ascending': ascending,
+            'abduction_code': abuduction_code,
+            'deduction_code': deduction_code,
         })
 
     def show_records(self):
@@ -78,10 +80,14 @@ class History(object):
                 hypothesis = self.records[i]['hypothesis']
                 evaluation = self.records[i]['evaluation']
                 match_rate = self.records[i]['match_rate']
+                abuduction_code = self.records[i]['abuduction_code']
+                deduction_code = self.records[i]['deduction_code']
                 hist_str += f'Iteration #{i+1}\n'
                 hist_str += f'Hypothesis:\n{hypothesis}\n\n'
                 hist_str += f'Evaluation:\n{evaluation}\n\n'
                 hist_str += f'Match Rate: {match_rate}\n\n'
+                hist_str += f'Abuduction Code:\n{abuduction_code}\n\n'
+                hist_str += f'Deduction Code:\n{deduction_code}\n\n'
             return hist_str
         
     def load_records_from_log(self, log_path, iteration=-1):
@@ -140,13 +146,18 @@ class History(object):
                 if len(attr_parts) >= 2:
                     attribute = attr_parts[0]
                     ascending = "ascending=True" in attr_line
-            
+            abduction_code_match = re.search(r'Code:\n([\s\S]*?)(?=^={5,}|\Z)', iter_content, re.MULTILINE)
+            abduction_code = abduction_code_match.group(1).rstrip() if abduction_code_match else ""
+            deduction_code_match = re.search(r'Inverse code:\n([\s\S]*?)(?=All|\Z)', iter_content, re.MULTILINE)
+            deduction_code = deduction_code_match.group(1).rstrip() if deduction_code_match else ""
             record = {
                 'hypothesis': hypothesis,
                 'evaluation': evaluation,
                 'match_rate': match_rate,
                 'attribute': attribute,
                 'ascending': ascending,
+                'abduction_code': abduction_code,
+                'deduction_code': deduction_code,
             }
             records.append(record)
         self.records = records
