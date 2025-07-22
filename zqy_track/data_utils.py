@@ -60,14 +60,14 @@ class History(object):
         super(History, self).__init__()
         self.records = ['']
 
-    def update_records(self, hypothesis, evaluation, match_rate, attribute=None, ascending=None, abuduction_code=None, deduction_code=None):
+    def update_records(self, hypothesis, evaluation, match_rate, attribute=None, ascending=None, abduction_code=None, deduction_code=None):
         self.records.append({
             'hypothesis': hypothesis, 
             'evaluation': evaluation, 
             'match_rate': match_rate,
             'attribute': attribute,
             'ascending': ascending,
-            'abduction_code': abuduction_code,
+            'abduction_code': abduction_code,
             'deduction_code': deduction_code,
         })
 
@@ -80,13 +80,13 @@ class History(object):
                 hypothesis = self.records[i]['hypothesis']
                 evaluation = self.records[i]['evaluation']
                 match_rate = self.records[i]['match_rate']
-                abuduction_code = self.records[i]['abuduction_code']
+                abduction_code = self.records[i]['abduction_code']
                 deduction_code = self.records[i]['deduction_code']
                 hist_str += f'Iteration #{i+1}\n'
                 hist_str += f'Hypothesis:\n{hypothesis}\n\n'
                 hist_str += f'Evaluation:\n{evaluation}\n\n'
                 hist_str += f'Match Rate: {match_rate}\n\n'
-                hist_str += f'Abuduction Code:\n{abuduction_code}\n\n'
+                hist_str += f'Abuduction Code:\n{abduction_code}\n\n'
                 hist_str += f'Deduction Code:\n{deduction_code}\n\n'
             return hist_str
         
