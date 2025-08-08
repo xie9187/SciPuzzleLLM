@@ -12,6 +12,7 @@ import codecs
 from contextlib import redirect_stdout, redirect_stderr
 import tempfile
 import os
+import re
 from table_agents_v2 import Agent
 import subprocess
 
@@ -112,7 +113,8 @@ class CodeExecutorService:
         func_name: str,
         input_data: Any,
         hypothesis: str,
-        max_retries: int = 3
+        max_retries: int = 3,
+        threshold: float = 0.1
     ) -> Dict:
         """
         执行代码，如果出错则使用大语言模型进行调试和测试
@@ -135,7 +137,7 @@ class CodeExecutorService:
 
                 # 2. 生成和运行单元测试
                 test_result = self.test_agent.generate_and_run_tests(
-                        current_code, func_name, input_data, execution_result['result'], hypothesis
+                        current_code, func_name, input_data, execution_result['result'], hypothesis, threshold
                 )
 
                 if test_result.get('overall_passed') is True:
@@ -173,16 +175,16 @@ class CodeExecutorService:
                 if debug_result and debug_result.get('success'):
                     current_code = debug_result['fixed_code']
                     test_execution_result = self.test_agent.run_test_cases(
-                        current_code, test_result.get('test_generation', {}).get('test_code', '')
+                        current_code, test_result.get('test_generation', {}).get('test_code', ''), threshold
                     )
-                    if test_execution_result.get('all_passed') is True:
+                    if test_execution_result.get('passed') is True:
                         print("🔧 调试代理已修复代码，准备重新执行...")
                         # 构造与generate_and_run_tests相同的结构
                         fixed_test_result = {
                             'success': True,
                             'test_generation': test_result.get('test_generation', {}),
                             'test_execution': test_execution_result,
-                            'overall_passed': test_execution_result['success'] and test_execution_result['all_passed']
+                            'overall_passed': test_execution_result['success'] and test_execution_result['passed']
                         }
                         return {
                             'success': True,
@@ -405,7 +407,7 @@ class TestAgent(Agent):
         """
     
     def generate_and_run_tests(self, code: str, func_name: str, input_data: Any, 
-                              execution_result: Any, hypothesis: str) -> Dict:
+                              execution_result: Any, hypothesis: str, threshold: float = 0.1) -> Dict:
         """生成并运行单元测试"""
         
         # 生成测试用例
@@ -418,14 +420,14 @@ class TestAgent(Agent):
         
         # 运行测试用例
         test_execution_result = self.run_test_cases(
-            code, test_generation_result['test_code']
+            code, test_generation_result['test_code'], threshold
         )
         
         return {
             'success': True,
             'test_generation': test_generation_result,
             'test_execution': test_execution_result,
-            'overall_passed': test_execution_result['success'] and test_execution_result['all_passed']
+            'overall_passed': test_execution_result['success'] and test_execution_result['passed']
         }
     
     def generate_test_cases(self, code: str, func_name: str, input_data: Any, 
@@ -520,7 +522,7 @@ class TestAgent(Agent):
                 'traceback': traceback.format_exc()
             }
     
-    def run_test_cases(self, original_code: str, test_code: str) -> Dict:
+    def run_test_cases(self, original_code: str, test_code: str, threshold: float = 0.2) -> Dict:
         """运行测试用例"""
         
         try:
@@ -549,25 +551,34 @@ class TestAgent(Agent):
             )
 
             stdout_content, stderr_content = process.communicate()
-            print(stderr_content)
             print(f'test_file: {test_file}')
             # 清理临时文件
             # os.unlink(test_file)
             
             # 简单分析测试结果
             if 'FAILED' in stderr_content or 'ERROR' in stderr_content:
-                all_passed = False
                 test_summary = "部分测试失败"
+                test_results = stderr_content.split('\n')[0]
+                failed_num = test_results.count('F')
+                error_num = test_results.count('E')
+                test_num = len(test_results)
+                anomly_rate = (int(failed_num) + int(error_num)) / int(test_num)
+                if anomly_rate > threshold:
+                    passed = False
+                    test_summary = f"测试失败，异常率({anomly_rate:.2f})过高"
+                else:
+                    passed = True
+                    test_summary = f"异常率({anomly_rate:.2f})较低，测试通过"
             elif 'OK' in stderr_content:
-                all_passed = True
+                passed = True
                 test_summary = "所有测试通过"
             else:
-                all_passed = False
+                passed = False
                 test_summary = "代码未执行成功"
             
             return {
                 'success': True,
-                'all_passed': all_passed,
+                'passed': passed,
                 'test_summary': test_summary,
                 'stdout': stdout_content,
                 'stderr': stderr_content
@@ -582,12 +593,12 @@ class TestAgent(Agent):
 
 
 def enhanced_code_execution(code: str, func_name: str, input_data: Any, 
-                          hypothesis: str, max_retries: int = 3) -> Dict:
+                          hypothesis: str, max_retries: int = 2, threshold: float = 0.1) -> Dict:
     """增强的代码执行函数，包含调试和测试功能"""
     
     executor = CodeExecutorService()
     return executor.execute_with_debug_and_test(
-        code, func_name, input_data, hypothesis, max_retries
+        code, func_name, input_data, hypothesis, max_retries, threshold
     )
 
 

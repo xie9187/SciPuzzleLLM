@@ -15,7 +15,7 @@ class Agent(object):
             os.environ["BASE_URL"] = getpass.getpass("Enter BASE URL: ")
         self.key = os.environ.get("OPENAI_API_KEY") #我的key
         self.url = os.environ.get("BASE_URL")
-        self.model = 'deepseek-v3' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
+        self.model = 'gpt-5' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
 
     def get_LLM_response(self, prompt_msgs):    
         # Set API key and base URL
@@ -23,7 +23,8 @@ class Agent(object):
         start_time = time.time()
         response = client.chat.completions.create(
             model=self.model,
-            messages=prompt_msgs
+            messages=prompt_msgs,
+            timeout=60,  # 添加60秒超时
         )
         response_time = time.time() - start_time
         print(f'Got response from {self.model} in {response_time:.1f} sec.')
@@ -38,7 +39,8 @@ class Agent(object):
             messages=prompt_msgs,
             response_format={
                 "type": "json_object"
-            }
+            },
+            timeout=60,  # 添加60秒超时
         )
         response_time = time.time() - start_time
         print(f'Got response from {self.model} in {response_time:.1f} sec.')
@@ -273,7 +275,7 @@ class DeductionAgent(Agent):
 
         已知逆函数为：
         <inverse_code>
-        {history.records[-1]['deduction_code']}
+        {history.records[-1]['deduction_code'] if len(history.records) > 1 else ''}
         </inverse_code>
 
         任务要求：
@@ -442,12 +444,13 @@ class RecordAgent(Agent):
         1. 根据提供的最优假设，以及最后的假设总结并优化假设。
         2. 假设尽可能清晰，便于后续转化为python代码。
         3. 输出的格式与单个历史记录一致，包括假设、评价与预测元素成功匹配率，以及主属性、主属性是否升序, 填表函数代码，逆函数代码。
+        4. 请以JSON格式返回结果。
         '''
         user_prompt = f'''
         当前的历史记录为：
         <history introduction>
         {self.history_introduction}
-        </history introduction>
+        </history introduction> 
         
         任务要求：
         <task>

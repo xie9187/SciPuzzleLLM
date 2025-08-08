@@ -2,10 +2,10 @@ import pandas as pd
 import random
 import os
 from os.path import join
-
+import sys
 from pymatgen.core.periodic_table import Element
 from sklearn.preprocessing import MinMaxScaler
-
+import numpy as np
 from table_agents_v2 import *
 from data_utils import *
 from code_executor import enhanced_code_execution
@@ -172,7 +172,7 @@ class TableState(object):
         """
         生成属性值的表格可视化字符串
         参数:
-            attr_name: 要显示的属性列名
+            attr_name: 要显示的属性列名 
         返回:
             对齐的表格字符串，空白位置用空字符串表示
         """
@@ -185,7 +185,8 @@ class TableState(object):
         max_col = int(self.elem_df['col'].max())
         
         # 创建空表格 (row+1行 x col+1列，因为从0或1开始计数)
-        table = [['' for _ in range(max_col)] for _ in range(max_row)]
+        table = np.empty((max_row, max_col), dtype=object)
+        table.fill('')
         
         # 填充已填入的元素
         filled = self.elem_df.dropna(subset=['col', 'row'])
@@ -195,18 +196,18 @@ class TableState(object):
             if 0 <= r < max_row and 0 <= c < max_col:
                 attr_value = row[attr_name]
                 if pd.api.types.is_float(attr_value) and not pd.isna(attr_value):
-                    table[r][c] = f"{float(attr_value):.1f}"
+                    table[r, c] = f"{float(attr_value):.1f}"
                 else:
-                    table[r][c] = str(attr_value)
+                    table[r, c] = str(attr_value)
         
         # 计算每列最大宽度
-        col_widths = [max(len(str(table[r][c])) for r in range(max_row)) for c in range(max_col)]
+        col_widths = [max(len(str(cell)) for cell in col) for col in table.T]
         
         # 生成表格字符串
         table_lines = []
         for r in range(max_row):
             line = '|' + ', '.join(
-                f" {table[r][c]:^{col_widths[c]}} " for c in range(max_col)
+                f" {table[r, c]:^{col_widths[c]}} " for c in range(max_col)
             ) + '|'
             table_lines.append(line)
         
@@ -308,7 +309,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     # 使用增强的代码执行系统
 
     execution_result = enhanced_code_execution(
-        code, func_name, table.elem_df.copy(), hypothesis, max_retries
+        code, func_name, table.elem_df.copy(), hypothesis, max_retries, threshold=0.1
     )
     
     if not execution_result['success']:
@@ -403,9 +404,12 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     return table, history, decision, matched_df
 
 if __name__ == '__main__':
-    
-    data_path = r'D:\data\SciPuzzleLLM'
-
+    if sys.platform == 'win32':
+        data_path = r'D:\data\SciPuzzleLLM'
+    else:
+        data_path = r'/data/SciPuzzleLLM'
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
     # make table data and object
     table_file = join(data_path, 'PeriodicTable.csv')
     if not os.path.exists(table_file):
@@ -434,7 +438,7 @@ if __name__ == '__main__':
     history = History()
     
     # Optionally load previous records from a specific log
-    history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
+    # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
     max_iter = 2

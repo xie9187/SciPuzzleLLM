@@ -76,17 +76,21 @@ class History(object):
             return 'empty history'
         else:
             hist_str = ''
-            for i in range(len(self.records)):
-                hypothesis = self.records[i]['hypothesis']
-                evaluation = self.records[i]['evaluation']
-                match_rate = self.records[i]['match_rate']
-                abduction_code = self.records[i]['abduction_code']
-                deduction_code = self.records[i]['deduction_code']
+            for i, record in enumerate(self.records):
+                # 确保记录是字典类型
+                if not isinstance(record, dict):
+                    continue
+                    
+                hypothesis = record.get('hypothesis', 'N/A')
+                evaluation = record.get('evaluation', 'N/A')
+                match_rate = record.get('match_rate', 'N/A')
+                abduction_code = record.get('abduction_code', 'N/A')
+                deduction_code = record.get('deduction_code', 'N/A')
                 hist_str += f'Iteration #{i+1}\n'
                 hist_str += f'Hypothesis:\n{hypothesis}\n\n'
                 hist_str += f'Evaluation:\n{evaluation}\n\n'
                 hist_str += f'Match Rate: {match_rate}\n\n'
-                hist_str += f'Abuduction Code:\n{abduction_code}\n\n'
+                hist_str += f'Abduction Code:\n{abduction_code}\n\n'
                 hist_str += f'Deduction Code:\n{deduction_code}\n\n'
             return hist_str
         
