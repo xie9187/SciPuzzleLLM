@@ -134,7 +134,15 @@ class CodeExecutorService:
 
             if execution_result.get('success'):
                 print("✅ 代码执行成功!")
-
+                if threshold == 1:
+                    return {
+                        'success': True,
+                        'result': execution_result['result'],
+                        'code': current_code,
+                        'execution_details': execution_result,
+                        'test_result': test_result,
+                        'attempts': attempt + 1
+                    }
                 # 2. 生成和运行单元测试
                 test_result = self.test_agent.generate_and_run_tests(
                         current_code, func_name, input_data, execution_result['result'], hypothesis, threshold
@@ -598,8 +606,8 @@ def enhanced_code_execution(code: str, func_name: str, input_data: Any,
     
     executor = CodeExecutorService()
     return executor.execute_with_debug_and_test(
-        code, func_name, input_data, hypothesis, max_retries, threshold
-    )
+            code, func_name, input_data, hypothesis, max_retries, threshold
+        )
 
 
 if __name__ == '__main__':

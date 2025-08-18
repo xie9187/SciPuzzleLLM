@@ -20,7 +20,7 @@ def generate_table():
         21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 38,
         39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 56,
         57, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 92
-    }
+    }   
 
     # 先只考虑使用前60个元素，降低难度
     n_elem = 60
@@ -41,7 +41,6 @@ def generate_table():
         else:
             metal_type = "Nonmetal"
 
-
         # 常温状态判断（用 boiling_point 和 melting_point）
         if e.boiling_point and e.boiling_point < 298:
             state = "Gas"
@@ -49,11 +48,12 @@ def generate_table():
             state = "Liquid"
         else:
             state = "Solid"
-
+        
         element_data.append({
             "AtomicNumber": e.Z,
             "Element": e.long_name,
             "Symbol": e.symbol,
+            "group": e.group, 
             "AtomicMass": float(e.atomic_mass) if e.atomic_mass else None,
             "OxidationStates": ", ".join(map(str, e.common_oxidation_states)) if e.common_oxidation_states else 0,
             "StateAtRoomTemp": state,
@@ -117,8 +117,9 @@ def mask_table(df: pd.DataFrame, known_to_mendeleev: bool = True) -> pd.DataFram
     # 6. MetalType 映射为 Type1, Type2...
     type_mapping = {typ: f"Type{i+1}" for i, typ in enumerate(df["MetalType"].unique())}
     df["MetalType"] = df["MetalType"].map(type_mapping)
-
-    # 7. 转换列名为 Attribute1, Attribute2,...
+    # 7. group
+    
+    # 8. 转换列名为 Attribute1, Attribute2,...
     columns = list(df.columns)
     
     # 第一列命名为 Element
@@ -130,11 +131,11 @@ def mask_table(df: pd.DataFrame, known_to_mendeleev: bool = True) -> pd.DataFram
     
     df = df.rename(columns=new_column_names)
 
-    # 8. 按照 Element 排序（按 ElemXXX 的数字部分升序排列）
+    # 9. 按照 Element 排序（按 ElemXXX 的数字部分升序排列）
     df["TempSortKey"] = df["Element"].str.extract(r"(\d+)").astype(int)
     df = df.sort_values("TempSortKey").drop(columns="TempSortKey")
 
-    # 9. 根据 Known 分割数据
+    # 10. 根据 Known 分割数据
     train_df = df[df["Test"] == False].drop(columns=["Test"])
     test_df = df[df["Test"] == True].drop(columns=["Test"])
 
@@ -213,6 +214,8 @@ class TableState(object):
         
         return '\n'.join(table_lines)
 
+
+
     def find_matched_elements(self, df1, df2, tolerance=1.0):
         """
         通过行循环匹配两个 DataFrame 的所有共有属性列（除了 row 和 col）
@@ -241,6 +244,9 @@ class TableState(object):
                 match = True
                 # 4. 检查所有共有列是否匹配
                 for col in common_cols:
+                    if pd.isna(row1[col]) or pd.isna(row2[col]):
+                        match = False
+                        break
                     if col == "Attribute1":
                         # Attribute1 允许误差
                         if abs(row1[col] - row2[col]) >= tolerance:
@@ -309,7 +315,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     # 使用增强的代码执行系统
 
     execution_result = enhanced_code_execution(
-        code, func_name, table.elem_df.copy(), hypothesis, max_retries, threshold=0.1
+        code, func_name, table.elem_df.copy(), hypothesis, max_retries, threshold=0.5
     )
     
     if not execution_result['success']:
@@ -320,8 +326,6 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     
     # 显示执行详情
     print_and_enter(f"✅ 代码执行成功，尝试次数: {execution_result['attempts']}")
-    if execution_result.get('test_result'):
-        print_and_enter(f"📋 单元测试结果: {execution_result['test_result']['overall_passed']}")
 
     
     success = True
@@ -348,7 +352,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     # 使用增强的代码执行系统
     execution_result = enhanced_code_execution(
         inverse_code, func_name, (new_elems_posi, table.elem_df.copy()), 
-        f"根据元素位置预测元素属性，符合假设: {hypothesis}", max_retries
+        f"根据元素位置预测元素属性，符合假设: {hypothesis}", max_retries, threshold=0.5
     )
     
     if not execution_result['success']:
@@ -359,8 +363,6 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     
     # 显示执行详情
     print(f"✅ 反向代码执行成功，尝试次数: {execution_result['attempts']}")
-    if execution_result.get('test_result'):
-        print(f"📋 单元测试结果: {execution_result['test_result']['overall_passed']}")
 
     
     success = True
@@ -441,13 +443,13 @@ if __name__ == '__main__':
     # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
-    max_iter = 2
+    max_iter = 3
     max_retries = 3
     decision = 'C'
     try:
         for i in range(max_iter):
 
-            print(logger.new_part(f'Iteration {i+1}'))
+            print(logger.new_part(f'Iteration {i}'))
 
             table, history, decision, matched_df = hypo_gen_and_eval(
                 table, agents, history, decision, logger, max_retries)
