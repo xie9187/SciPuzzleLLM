@@ -1,7 +1,5 @@
 import multiprocessing
-import time
-import types
-import unittest
+import ast
 import traceback
 import json
 import pandas as pd
@@ -133,7 +131,7 @@ class CodeExecutorService:
             execution_result = self.execute_code_in_process(current_code, func_name, input_data)
 
             if execution_result.get('success'):
-                print("✅ 代码执行成功!")
+                print(" 代码执行成功!")
                 if threshold == 1:
                     return {
                         'success': True,
@@ -162,7 +160,7 @@ class CodeExecutorService:
             debug_result = None
             if attempt < max_retries:
                 if not execution_result.get('success'):
-                    print(f"❌ 代码执行失败: {execution_result.get('error')}")
+                    print(f" 代码执行失败: {execution_result.get('error')}")
                     debug_result = self.debug_agent.debug_error_code(
                         current_code,
                         func_name,
@@ -171,7 +169,7 @@ class CodeExecutorService:
                         hypothesis
                     )
                 elif test_result.get('overall_passed') is False:
-                    print(f"❌ 单元测试失败: {test_result['test_execution'].get('test_summary', '')}")
+                    print(f" 单元测试失败: {test_result['test_execution'].get('test_summary', '')}")
                     debug_result = self.debug_agent.debug_unittest_code(
                         current_code,
                         func_name,
@@ -186,7 +184,7 @@ class CodeExecutorService:
                         current_code, test_result.get('test_generation', {}).get('test_code', ''), threshold
                     )
                     if test_execution_result.get('passed') is True:
-                        print("🔧 调试代理已修复代码，准备重新执行...")
+                        print(" 调试代理已修复代码，准备重新执行...")
                         # 构造与generate_and_run_tests相同的结构
                         fixed_test_result = {
                             'success': True,
@@ -203,13 +201,13 @@ class CodeExecutorService:
                             'attempts': attempt + 1
                         }
                     else:
-                        print(f"❌ 调试代理修复后的代码单元测试失败: {test_execution_result.get('test_summary', '')}")
+                        print(f" 调试代理修复后的代码单元测试失败: {test_execution_result.get('test_summary', '')}")
 
                         continue
                 elif debug_result:
-                    print(f"❌ 调试代理无法修复代码: {debug_result.get('error')}")
+                    print(f"调试代理无法修复代码: {debug_result.get('error')}")
             else:
-                print("❌ 达到最大重试次数，代码执行失败")
+                print("达到最大重试次数，代码执行失败")
         if execution_result and execution_result.get('success'):
             success = True
             result = execution_result.get('result')
@@ -413,6 +411,13 @@ class TestAgent(Agent):
         你是一位专业的Python单元测试专家。你的任务是为给定的代码生成全面的单元测试，
         验证代码是否正确实现了预期功能。
         """
+    def evaluate_complexity(self, code:str):
+        # McCabe
+        tree = ast.parse(code)
+        cv = ComplexityVisitor()
+        cv.visit(tree)
+        cyclomatic = 1 + cv.decisions
+        return cyclomatic  
     
     def generate_and_run_tests(self, code: str, func_name: str, input_data: Any, 
                               execution_result: Any, hypothesis: str, threshold: float = 0.1) -> Dict:
@@ -529,7 +534,6 @@ class TestAgent(Agent):
                 'error': f'生成测试用例时出错: {str(e)}',
                 'traceback': traceback.format_exc()
             }
-    
     def run_test_cases(self, original_code: str, test_code: str, threshold: float = 0.2) -> Dict:
         """运行测试用例"""
         
@@ -599,6 +603,81 @@ class TestAgent(Agent):
                 'traceback': traceback.format_exc()
             }
 
+class ComplexityVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.decisions = 0
+        self.branches = 0
+        self.loops = 0
+        self.bool_ops = 0
+        self.ternary = 0
+        self.try_nodes = 0
+        self.compr_ifs = 0
+        self.max_depth = 0
+        self._depth = 0
+
+    def generic_visit(self, node):
+        # Track nesting depth based on blocks
+        block_nodes = (ast.If, ast.For, ast.While, ast.Try, ast.With, ast.FunctionDef, ast.AsyncFunctionDef)
+        if isinstance(node, block_nodes):
+            self._depth += 1
+            self.max_depth = max(self.max_depth, self._depth)
+            super().generic_visit(node)
+            self._depth -= 1
+        else:
+            super().generic_visit(node)
+
+    def visit_If(self, node):
+        # Each if/elif counts as a decision
+        self.decisions += 1
+        self.branches += 1
+        # Count boolean ops inside condition
+        self.bool_ops += self._count_boolops(node.test)
+        self.generic_visit(node)
+
+    def visit_For(self, node):
+        self.decisions += 1
+        self.loops += 1
+        self.generic_visit(node)
+
+    def visit_While(self, node):
+        self.decisions += 1
+        self.loops += 1
+        self.bool_ops += self._count_boolops(node.test)
+        self.generic_visit(node)
+
+    def visit_Try(self, node):
+        # Each except increases decision
+        self.try_nodes += len(node.handlers)
+        self.decisions += len(node.handlers)
+        self.generic_visit(node)
+
+    def visit_IfExp(self, node):  # ternary a if cond else b
+        self.ternary += 1
+        self.decisions += 1
+        self.bool_ops += self._count_boolops(node.test)
+        self.generic_visit(node)
+
+    def visit_BoolOp(self, node):
+        # `and` / `or` chain of length k adds (k-1) decision points; we separately count in conditions
+        self.generic_visit(node)
+
+    def visit_comprehension(self, node):
+        # Ifs in comprehensions
+        self.compr_ifs += len(node.ifs)
+        self.decisions += len(node.ifs)
+        self.generic_visit(node)
+
+    def _count_boolops(self, test):
+        class BoolCounter(ast.NodeVisitor):
+            def __init__(self):
+                self.count = 0
+            def visit_BoolOp(self, node):
+                # a and b and c: adds len(values)-1
+                self.count += len(node.values) - 1
+                self.generic_visit(node)
+        bc = BoolCounter()
+        bc.visit(test)
+        return bc.count
 
 def enhanced_code_execution(code: str, func_name: str, input_data: Any, 
                           hypothesis: str, max_retries: int = 2, threshold: float = 0.1) -> Dict:
@@ -628,6 +707,9 @@ def test_function(df):
     })
     
     test_hypothesis = "根据元素属性将元素排列在周期表格中"
-    
+    tree = ast.parse(test_code)
+    cv = ComplexityVisitor()
+    cv.visit(tree)
+    cyclomatic = 1 + cv.decisions
     result = enhanced_code_execution(test_code, 'test_function', test_input, test_hypothesis)
     print(json.dumps(result, indent=2, ensure_ascii=False)) 
