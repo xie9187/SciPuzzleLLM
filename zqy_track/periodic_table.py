@@ -9,7 +9,7 @@ import numpy as np
 from table_agents_v2 import *
 from data_utils import *
 from code_executor import enhanced_code_execution
-
+from evaluation import EarlyStopper
 def generate_table():
     # 初始化数据列表
     element_data = []
@@ -24,9 +24,16 @@ def generate_table():
 
     # 先只考虑使用前60个元素，降低难度
     n_elem = 60
-    
-    # 随机选择10个测试集元素
-    test = random.sample(range(n_elem), 10)
+    # 使用10个元素测试
+    n_sample = 10
+    # stratified random sampling
+    group_size = n_elem // n_sample  
+
+    test = []
+    for i in range(n_sample):
+        start = i * group_size
+        end = (i+1) * group_size if i < n_sample - 1 else n_elem  
+        test.append(random.choice(range(start, end)))
     
     for Z in range(1, n_elem+1):
         e = Element.from_Z(Z)
@@ -443,27 +450,39 @@ if __name__ == '__main__':
     # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
     logger = Logger(join(data_path, 'logs'))
-    max_iter = 3
+    max_iter = 5
     max_retries = 3
     decision = 'C'
+    patience = 3
+    min_delta = 0
+    min_iters = 3
+    stopper = EarlyStopper(patience=patience, min_delta=min_delta, min_iters=min_iters)
+    best_score = -float("inf")
     try:
         for i in range(max_iter):
 
-            print(logger.new_part(f'Iteration {i}'))
+            print(logger.new_part(f'Iteration {i+1}'))
 
             table, history, decision, matched_df = hypo_gen_and_eval(
                 table, agents, history, decision, logger, max_retries)
-
+            # early stop
+            # TODO: Add code complexity penalty
+            match_score = history.records[-1]['match_rate']
+            should_continue = stopper.update(i, match_score, (table, history, decision, matched_df))
+            best_score = max(best_score, match_score)
+            if not should_continue:
+                print("Stop as the iteration stops improving (early stopping).")
+                break    
             if decision == 'P':
                 print('Stop as the hypothesis is accepted!')
                 break
-
-        if i == max_iter - 1:
-            print(f'Stop as the max iteration {i+1} is reached!')
+            if i == max_iter - 1:
+                print(f'Stop as the max iteration {i+1} is reached!')
 
         print('\nhistory:')
         print(history.show_records())
-
+        if stopper.best_payload is not None:
+            table, history, decision, matched_df = stopper.best_payload
         final_df = table.elem_df.copy()
         # 新增 KnownAndMatched 列
         matched_elements = set(matched_df.index) if matched_df is not None else set()

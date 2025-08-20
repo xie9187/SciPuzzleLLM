@@ -2,7 +2,8 @@ import os
 import pandas as pd
 from os.path import join
 from data_utils import History
-
+import copy
+from typing import Any, Dict, Tuple, Optional
 def get_folders(path):
     return [f for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]
 
@@ -126,6 +127,34 @@ def evaluate(exp_path):
     
     return iteration_table
 
+class EarlyStopper:
+    def __init__(self, patience: int = 3, min_delta: float = 0.0, min_iters: int = 0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.min_iters = min_iters
+        self.counter = 0
+        self.best_score = -float("inf")
+        self.best_payload = None  # 保存最优的完整状态
+
+    def improved(self, score: float) -> bool:
+        return score > self.best_score + self.min_delta
+
+    def update(self, iter_idx: int, score: float, payload: Tuple[Any, Any, Any, Any]) -> bool:
+        """
+        返回值：是否应继续训练（True=继续, False=早停）
+        """
+        if self.improved(score):
+            self.best_score = score
+            # 深拷贝以确保后续迭代不破坏最优状态
+            self.best_payload = copy.deepcopy(payload)
+            self.counter = 0
+            return True
+        else:
+            self.counter += 1
+            if iter_idx + 1 <= self.min_iters:
+                return True
+            return self.counter < self.patience
+        
 if __name__ == '__main__':
     data_path = 'D:/data/SciPuzzleLLM'
     exp_path = join(data_path, 'logs', '100x2')

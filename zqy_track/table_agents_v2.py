@@ -15,7 +15,7 @@ class Agent(object):
             os.environ["BASE_URL"] = getpass.getpass("Enter BASE URL: ")
         self.key = os.environ.get("OPENAI_API_KEY") #我的key
         self.url = os.environ.get("BASE_URL")
-        self.model = 'gpt-5' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
+        self.model = 'deepseek-v3' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
 
     def get_LLM_response(self, prompt_msgs):    
         # Set API key and base URL
