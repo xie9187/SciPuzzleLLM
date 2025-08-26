@@ -1,0 +1,352 @@
+import os
+import sys
+import re
+from datetime import datetime
+import json
+from os.path import join
+from viz_utils import create_periodic_table_plot
+from table_agents_v2 import RecordAgent
+
+def print_and_enter(content):
+    print(content)
+    print(' ')
+
+class Logger:
+    def __init__(self, log_path):
+        # 生成带时间戳的文件名
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        self.log_folder = join(log_path, timestamp)
+        if not os.path.exists(self.log_folder):
+            os.makedirs(self.log_folder)
+
+        self.log_file = open(join(self.log_folder, 'log.txt'), 'w', encoding='utf-8')
+        
+        # 保存原始stdout
+        self.original_stdout = sys.stdout
+        
+        # 设置同时输出到控制台和文件
+        sys.stdout = self
+
+    def write(self, message):
+        self.original_stdout.write(message)  # 控制台输出
+        self.log_file.write(message)         # 文件写入
+
+    def flush(self):
+        self.original_stdout.flush()
+        self.log_file.flush()
+
+    def close(self):
+        sys.stdout = self.original_stdout
+        self.log_file.close()
+
+    def new_part(self, part_name):
+        syb_len = 40
+        line_str = "\n" + "="*syb_len + f" {part_name} " + "="*syb_len
+        return line_str
+
+    def log_table_as_csv(self, df):
+        df.to_csv(join(self.log_folder, 'table.csv'))
+
+    def log_table_as_img(self, df, iteration=None, matched_df=None, test_df=None):
+        # 若没有任何位置信息，则直接跳过可视化，避免重复警告
+        try:
+            if {'row', 'col'}.issubset(df.columns) and df[['row', 'col']].isna().all().all():
+                print('⚠️ 表格中row/col均为空，跳过全部可视化输出')
+                return
+        except Exception:
+            pass
+
+        for attribute in list(df.columns):
+            if attribute in ['row', 'col']:
+                continue
+            
+            file_name = f'table_{attribute}.png' if iteration is None else f'table_{iteration}iter_{attribute}.png'
+            save_path = join(self.log_folder, file_name)
+            
+            if attribute == 'MatchCount':
+                # 使用专门的MatchCount可视化函数
+                from viz_utils import create_matchcount_plot
+                create_matchcount_plot(df, matched_df, test_df, save_path)
+            else:
+                # 使用通用的可视化函数
+                key_idx = -1 if attribute == 'KnownAndMatched' else 0
+                from viz_utils import create_periodic_table_plot
+                create_periodic_table_plot(df, attribute, save_path, key_idx=key_idx)                    
+
+class History(object):
+    def __init__(self):
+        super(History, self).__init__()
+        self.records = ['']
+
+    def update_records(self, hypothesis, evaluation, match_rate, attribute=None, ascending=None, decision=None):
+        self.records.append({
+            'hypothesis': hypothesis, 
+            'evaluation': evaluation, 
+            'match_rate': match_rate,
+            'attribute': attribute,
+            'ascending': ascending,
+            'decision': decision
+        })
+
+    def show_records(self):
+        if len(self.records) == 0:
+            return 'empty history'
+        else:
+            # 过滤掉非字典的记录（如空字符串）
+            valid_records = [record for record in self.records if isinstance(record, dict)]
+            if not valid_records:
+                return 'empty history'
+            
+            hist_str = ''
+            for i, record in enumerate(valid_records):
+                hypothesis = record.get('hypothesis', '')
+                evaluation = record.get('evaluation', '')
+                match_rate = record.get('match_rate', 0.0)
+                decision = record.get('decision', '')
+                hist_str += f'Iteration #{i+1}\n'
+                hist_str += f'Hypothesis:\n{hypothesis}\n\n'
+                hist_str += f'Evaluation:\n{evaluation}\n\n'
+                hist_str += f'Match Rate: {match_rate}\n\n'
+                hist_str += f'Decision:\n{decision}\n\n'
+            return hist_str
+        
+    def load_records_from_log(self, log_path, iteration=-1):
+        """
+        Load records from a log file
+        
+        Args:
+            log_path: Path to the log directory
+            iteration: Specific iteration to load (-1 for all iterations)
+        
+        Returns:
+            List of record dictionaries
+        """
+        log_file = join(log_path, 'log.txt')
+        if not os.path.exists(log_file):
+            print(f"Log file not found: {log_file}")
+            return []
+        
+        with open(log_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Split content by iteration sections
+        iteration_sections = re.split(r'======================================== Iteration (\d+) ========================================', content)
+        
+        records = []
+        for i in range(1, len(iteration_sections), 2):  # Skip empty first section
+            iter_num = int(iteration_sections[i])
+            iter_content = iteration_sections[i + 1] if i + 1 < len(iteration_sections) else ""
+            
+            # If specific iteration requested, skip others
+            if iteration != -1 and iter_num != iteration:
+                continue
+            
+
+            hypothesis_match = re.search(r'Hypothesis:\n(.*?)(?=\nCode:|$)', iter_content, re.DOTALL)
+            
+            hypothesis = hypothesis_match.group(1).strip() if hypothesis_match else ""
+            
+            # Extract evaluation from Induction Process
+            evaluation_match = re.search(r'evaluation:\n(.*?)(?=\n\ndecision:|$)', iter_content, re.DOTALL)
+            evaluation = evaluation_match.group(1).strip() if evaluation_match else ""
+            
+            # Extract match rate from Induction Process
+            match_rate = 0.0
+            match_rate_match = re.search(r'Match Rate: (\d+\.\d+)', iter_content)
+            if match_rate_match:
+                match_rate = float(match_rate_match.group(1))
+            
+            # Extract main attribute and ascending from Abduction Process
+            main_attr_match = re.search(r'Main attribute:\n(.*?)(?=\n|$)', iter_content)
+            attribute = ""
+            ascending = True
+            if main_attr_match:
+                attr_line = main_attr_match.group(1).strip()
+                attr_parts = attr_line.split()
+                if len(attr_parts) >= 2:
+                    attribute = attr_parts[0]
+                    ascending = "ascending=True" in attr_line
+            
+            record = {
+                'hypothesis': hypothesis,
+                'evaluation': evaluation,
+                'match_rate': match_rate,
+                'attribute': attribute,
+                'ascending': ascending,
+            }
+            records.append(record)
+        self.records = records
+        return records
+    
+    def select_record(self):
+        if len(self.records) == 0 or len(self.records) == 1:
+            return 'empty history'
+        else:
+            # 过滤掉非字典的记录（如空字符串）
+            valid_records = [record for record in self.records if isinstance(record, dict)]
+            if not valid_records:
+                return 'empty history'
+            
+            if len(valid_records) == 1:
+                return json.dumps(valid_records[0], ensure_ascii=False)
+            else:
+                max_match_rate = max([record['match_rate'] for record in valid_records])
+                max_match_rate_record = [record for record in valid_records if record['match_rate'] == max_match_rate]
+                last_record = [valid_records[-1]]
+                merged_records = max_match_rate_record + last_record
+                record_agent = RecordAgent()
+                json_response = record_agent.merge_records(merged_records)
+                return json_response
+            
+
+
+    
+
+def execute_function(code_str, func_name, df):
+    namespace = {}
+    exec(code_str, namespace)
+    function = namespace[func_name]
+    result = function(df.copy()) 
+    return result
+
+
+def parse_log_file(log_dir_path, output_file_path):
+    """
+    解析log文件，提取abduction、deduction和induction的推理结果和决策情况
+    
+    Args:
+        log_dir_path: log文件夹路径，如 '/path/to/logs/2025-08-04-15-44-43'
+        output_file_path: 输出txt文件路径
+    """
+    
+    # 读取log.txt文件
+    log_file_path = os.path.join(log_dir_path, 'log.txt')
+    if not os.path.exists(log_file_path):
+        print(f"错误: 找不到log文件 {log_file_path}")
+        return
+    
+    with open(log_file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # 分割成迭代部分
+    iterations = re.split(r'======================================== Iteration \d+ ========================================', content)
+    
+    with open(output_file_path, 'w', encoding='utf-8') as f:
+        f.write("SciPuzzle LLM Log 解析结果\n")
+        f.write("=" * 50 + "\n\n")
+        
+        for i, iteration in enumerate(iterations[1:], 1):  # 跳过第一个空的部分
+            f.write(f"迭代 {i}\n")
+            f.write("-" * 30 + "\n\n")
+            
+            # 提取Abduction部分
+            abduction_match = re.search(r'======================================== Abduction Process ========================================(.*?)(?=========================================|$)', 
+                                      iteration, re.DOTALL)
+            if abduction_match:
+                abduction_content = abduction_match.group(1).strip()
+                f.write("【ABDUCTION 溯因推理】\n")
+                
+                # 提取Reasoning
+                reasoning_match = re.search(r'Reasoning:\n(.*?)(?=\nMain attribute:|$)', 
+                                         abduction_content, re.DOTALL)
+                if reasoning_match:
+                    f.write("推理过程:\n")
+                    f.write(reasoning_match.group(1).strip() + "\n\n")
+                
+                # 提取Main attribute
+                main_attr_match = re.search(r'Main attribute:\n(.*?)(?=\nGot response|$)', 
+                                          abduction_content, re.DOTALL)
+                if main_attr_match:
+                    f.write("主属性选择:\n")
+                    f.write(main_attr_match.group(1).strip() + "\n\n")
+                
+                # 提取Hypothesis
+                hypothesis_match = re.search(r'Reasoning:\n(.*?)(?=\nCode:|$)', 
+                                          abduction_content, re.DOTALL)
+                if hypothesis_match:
+                    # 找到第二个Reasoning（在代码执行成功之后）
+                    reasoning_parts = re.findall(r'Reasoning:\n(.*?)(?=\nCode:|$)', 
+                                               abduction_content, re.DOTALL)
+                    if len(reasoning_parts) > 1:
+                        f.write("假设生成:\n")
+                        f.write(reasoning_parts[1].strip() + "\n\n")
+            
+            # 提取Deduction部分 - 修复：Deduction部分在Abduction之后，没有明确标题
+            # 查找包含"New elem position"的部分
+            if abduction_match:
+                # 在Abduction内容之后查找Deduction相关内容
+                after_abduction = iteration[abduction_match.end():]
+                
+                # 查找包含"New elem position"的部分
+                new_elem_match = re.search(r'New elem position:\n(.*?)(?=\nInverse code:|$)', 
+                                         after_abduction, re.DOTALL)
+                if new_elem_match:
+                    # 向前查找相关的Reasoning，但要过滤掉代码部分
+                    reasoning_before_new_elem = re.search(r'Reasoning:\n(.*?)(?=\nNew elem position:|$)', 
+                                                        after_abduction, re.DOTALL)
+                    
+                    f.write("【DEDUCTION 演绎推理】\n")
+                    
+                    if reasoning_before_new_elem:
+                        reasoning_text = reasoning_before_new_elem.group(1).strip()
+                        # 过滤掉代码部分，只保留推理文字
+                        # 移除包含"Code:"及其后面的代码部分
+                        if "Code:" in reasoning_text:
+                            reasoning_text = reasoning_text.split("Code:")[0].strip()
+                        # 移除包含"import"、"def"等代码标识的部分
+                        lines = reasoning_text.split('\n')
+                        filtered_lines = []
+                        for line in lines:
+                            # 跳过代码行（包含import、def、return等）
+                            if any(keyword in line for keyword in ['import ', 'def ', 'return ', '    ', '    ']):
+                                continue
+                            # 跳过空行或只包含空格的行
+                            if line.strip() == '':
+                                continue
+                            filtered_lines.append(line)
+                        
+                        reasoning_text = '\n'.join(filtered_lines).strip()
+                        
+                        if reasoning_text:
+                            f.write("推理过程:\n")
+                            f.write(reasoning_text + "\n\n")
+                    
+                    f.write("新元素位置预测:\n")
+                    f.write(new_elem_match.group(1).strip() + "\n\n")
+            
+            # 提取Induction部分
+            induction_match = re.search(r'======================================== Induction Process ========================================(.*?)(?=========================================|$)', 
+                                      iteration, re.DOTALL)
+            if induction_match:
+                induction_content = induction_match.group(1).strip()
+                f.write("【INDUCTION 归纳推理】\n")
+                
+                # 提取Match Rate
+                match_rate_match = re.search(r'Match Rate: (.*?)\n', induction_content)
+                if match_rate_match:
+                    f.write(f"匹配率: {match_rate_match.group(1)}\n\n")
+                
+                # 提取Reasoning
+                reasoning_match = re.search(r'Reasoning:\n(.*?)(?=\nevaluation:|$)', 
+                                         induction_content, re.DOTALL)
+                if reasoning_match:
+                    f.write("推理过程:\n")
+                    f.write(reasoning_match.group(1).strip() + "\n\n")
+                
+                # 提取evaluation
+                evaluation_match = re.search(r'evaluation:\n(.*?)(?=\ndecision:|$)', 
+                                          induction_content, re.DOTALL)
+                if evaluation_match:
+                    f.write("评估结果:\n")
+                    f.write(evaluation_match.group(1).strip() + "\n\n")
+                
+                # 提取decision
+                decision_match = re.search(r'decision:\n(.*?)(?=\n|$)', 
+                                        induction_content, re.DOTALL)
+                if decision_match:
+                    f.write("决策结果:\n")
+                    f.write(decision_match.group(1).strip() + "\n\n")
+            
+            f.write("\n" + "=" * 50 + "\n\n")
+    
+    print(f"解析完成！结果已保存到: {output_file_path}")
