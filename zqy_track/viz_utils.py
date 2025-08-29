@@ -54,7 +54,8 @@ def create_periodic_table_plot(df, attribute, save_path=None, key_idx=0):
             # 构建合并的文本
             text_lines = []
             for _, elem in elements.iterrows():
-                elem_text = f"{elem.name}\n{elem['Attribute1']:.2f}|{elem['Attribute2']}\n{elem['Attribute3']}|{elem['Attribute4']}"
+                attributes = [f"{elem[col]}" for col in elem.index if col.startswith("Attribute")]
+                elem_text = f"{elem.name}\n" + " | ".join(attributes)
                 text_lines.append(elem_text)
             combined_text = '\n'.join(text_lines)
             

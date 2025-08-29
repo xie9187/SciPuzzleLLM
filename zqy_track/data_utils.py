@@ -6,7 +6,8 @@ import json
 from os.path import join
 from viz_utils import create_periodic_table_plot
 from table_agents_v2 import RecordAgent
-
+import pandas as pd
+from io import StringIO
 def print_and_enter(content):
     print(content)
     print(' ')
@@ -60,11 +61,12 @@ class History(object):
         super(History, self).__init__()
         self.records = ['']
 
-    def update_records(self, hypothesis, evaluation, match_rate, attribute=None, ascending=None, abduction_code=None, deduction_code=None):
+    def update_records(self, hypothesis, evaluation, match_rate, eval_score, attribute=None, ascending=None, abduction_code=None, deduction_code=None):
         self.records.append({
             'hypothesis': hypothesis, 
-            'evaluation': evaluation, 
+            'evaluation': evaluation,
             'match_rate': match_rate,
+            'eval_score': eval_score,
             'attribute': attribute,
             'ascending': ascending,
             'abduction_code': abduction_code,
@@ -83,12 +85,14 @@ class History(object):
                     
                 hypothesis = record.get('hypothesis', 'N/A')
                 evaluation = record.get('evaluation', 'N/A')
+                eval_score = record.get('eval_score', 'N/A')
                 match_rate = record.get('match_rate', 'N/A')
                 abduction_code = record.get('abduction_code', 'N/A')
                 deduction_code = record.get('deduction_code', 'N/A')
                 hist_str += f'Iteration #{i+1}\n'
                 hist_str += f'Hypothesis:\n{hypothesis}\n\n'
                 hist_str += f'Evaluation:\n{evaluation}\n\n'
+                hist_str += f'Eval Score:\n{eval_score}\n\n'
                 hist_str += f'Match Rate: {match_rate}\n\n'
                 hist_str += f'Abduction Code:\n{abduction_code}\n\n'
                 hist_str += f'Deduction Code:\n{deduction_code}\n\n'
@@ -139,7 +143,12 @@ class History(object):
             match_rate_match = re.search(r'Match Rate: (\d+\.\d+)', iter_content)
             if match_rate_match:
                 match_rate = float(match_rate_match.group(1))
-            
+
+            eval_score_match = re.search(r"Eval Score:\s*(.*?)\s*Name:\s*mean", iter_content, flags=re.S)
+
+            # to get eval score from logs
+            if eval_score_match:
+                eval_score = eval_score_match.group(1)
             # Extract main attribute and ascending from Abduction Process
             main_attr_match = re.search(r'Main attribute:\n(.*?)(?=\n|$)', iter_content)
             attribute = ""
@@ -158,6 +167,7 @@ class History(object):
                 'hypothesis': hypothesis,
                 'evaluation': evaluation,
                 'match_rate': match_rate,
+                'eval_score': eval_score,
                 'attribute': attribute,
                 'ascending': ascending,
                 'abduction_code': abduction_code,

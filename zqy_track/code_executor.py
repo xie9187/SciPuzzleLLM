@@ -712,4 +712,4 @@ def test_function(df):
     cv.visit(tree)
     cyclomatic = 1 + cv.decisions
     result = enhanced_code_execution(test_code, 'test_function', test_input, test_hypothesis)
-    print(json.dumps(result, indent=2, ensure_ascii=False)) 
+    print(json.dumps(result, indent=2, ensure_ascii=False))

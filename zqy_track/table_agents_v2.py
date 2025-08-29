@@ -15,7 +15,7 @@ class Agent(object):
             os.environ["BASE_URL"] = getpass.getpass("Enter BASE URL: ")
         self.key = os.environ.get("OPENAI_API_KEY") #我的key
         self.url = os.environ.get("BASE_URL")
-        self.model = 'deepseek-v3' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
+        self.model = 'claude-sonnet-4-20250514' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
 
     def get_LLM_response(self, prompt_msgs):    
         # Set API key and base URL
@@ -51,6 +51,10 @@ class Agent(object):
     def extract_content(self, tag, text):
         pattern = re.compile(f'<{tag}>(.*?)</{tag}>', re.DOTALL)
         match = pattern.search(text)
+        if tag == 'code':
+            if not match:
+                return '\n'.join([line for line in text.splitlines() 
+                                      if '```' not in line])
         return match.group(1).strip() if match else None
 
     def reflaction(self, task, raw_response):
@@ -383,7 +387,8 @@ class InductionAgent(Agent):
         与测试集元素能匹配上的潜在新元素：
         <matched_elem>
         {matched_elem_str}
-        匹配成功率{match_rate}
+        匹配成功率:
+        {match_rate}
         </new_elem>
 
         任务要求：

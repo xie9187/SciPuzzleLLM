@@ -10,6 +10,7 @@ from table_agents_v2 import *
 from data_utils import *
 from code_executor import enhanced_code_execution
 from evaluation import EarlyStopper
+import traceback
 def generate_table():
     # 初始化数据列表
     element_data = []
@@ -124,8 +125,11 @@ def mask_table(df: pd.DataFrame, known_to_mendeleev: bool = True) -> pd.DataFram
     # 6. MetalType 映射为 Type1, Type2...
     type_mapping = {typ: f"Type{i+1}" for i, typ in enumerate(df["MetalType"].unique())}
     df["MetalType"] = df["MetalType"].map(type_mapping)
-    # 7. group
-    
+    # 7. group 打乱顺序
+    group = df['group'].unique().copy()
+    random_groups = random.sample(range(10, 100), len(group))
+    group_mapping = dict(zip(df['group'].unique(), [f'group{i}' for i in random_groups]))
+    df['group'] = df['group'].map(group_mapping)
     # 8. 转换列名为 Attribute1, Attribute2,...
     columns = list(df.columns)
     
@@ -223,55 +227,102 @@ class TableState(object):
 
 
 
-    def find_matched_elements(self, df1, df2, tolerance=1.0):
+    def find_matched_elements(self, df1, df2, tolerance=4.0):
+
         """
-        通过行循环匹配两个 DataFrame 的所有共有属性列（除了 row 和 col）
-        
-        参数:
-            df1: 待匹配的 DataFrame（可能包含 row 和 col）
-            df2: 目标 DataFrame
-            tolerance: Attribute1 允许的误差范围（默认 1.0）
-        
-        返回:
-            匹配成功的 df1 的子集
+        以 df1 的顺序逐个样本在 df2 中寻找最相似样本，匹配后不放回（贪心匹配）。
+        相似度 = 交集列上逐列“是否匹配”的加权平均（此处等权），满分 1.0。
+        - 数值列:  |v1 - v2| <= tolerance 视为匹配
+        - 非数值列: v1 == v2 视为匹配
+        返回
+        matches_df: 逐样本匹配报告（包含 df1 索引、匹配到的 df2 索引、每列是否匹配、总体得分）
+        col_match_rate: 各列平均匹配率（只统计参与比较的样本对；若某样本该列有 NaN 则跳过该对）
+        约束
+        - 要求 len(df1) == len(df2)
         """
-        # 1. 找出两个 DataFrame 共有的列（排除 df1 的 row 和 col）
-        common_cols = [col for col in df1.columns 
-                       if col in df2.columns and col not in ["row", "col"]]
-        
+        if len(df1) != len(df2):
+            raise ValueError("df1 与 df2 的样本量必须相等。")
+
+        # 1) 列交集（并排除 row/col 等不参与列）
+        common_cols = [c for c in df1.columns if c in df2.columns]
         if not common_cols:
-            return pd.DataFrame()  # 如果没有共有列，返回空 DataFrame
-        
-        matched_indices = []
-        
-        # 2. 遍历 df1 的每一行
-        for idx1, row1 in df1.iterrows():
-            # 3. 对每个 df1 的行，遍历 df2 的所有行寻找匹配
-            for idx2, row2 in df2.iterrows():
-                match = True
-                # 4. 检查所有共有列是否匹配
-                for col in common_cols:
-                    if pd.isna(row1[col]) or pd.isna(row2[col]):
-                        match = False
-                        break
-                    if col == "Attribute1":
-                        # Attribute1 允许误差
-                        if abs(row1[col] - row2[col]) >= tolerance:
-                            match = False
-                            break
-                    else:
-                        # 其他属性必须完全相等
-                        if row1[col] != row2[col]:
-                            match = False
-                            break
+            raise ValueError("两个 DataFrame 没有可比较的公共列。")
+
+        # 2) 预先判断哪些列视为数值列（注意：dtype 可能是 object，但内容是数字）
+        def is_numeric_col(s1: pd.Series, s2: pd.Series, valid_threshold: float = 0.8) -> bool:
+            # 更稳健的判定：若两列都能大部分转换为数字，就当数值列
+            c1 = pd.to_numeric(s1, errors="coerce")
+            c2 = pd.to_numeric(s2, errors="coerce")
+            valid_ratio = (
+                (c1.notna() & c2.notna()).sum() / max(1, len(s1))
+            )
+            return valid_ratio >= valid_threshold  # 阈值可调
+
+        numeric_flags = {col: is_numeric_col(df1[col], df2[col]) for col in common_cols}
+
+        # 3) 打分函数（返回列级是否匹配的布尔字典 + 总分）
+        def row_similarity(r1: pd.Series, r2: pd.Series):
+            per_col_match = {}
+            considered = 0
+            matched = 0
+            for col in common_cols:
+                v1, v2 = r1[col], r2[col]
+                # 缺失值：跳过该列
+                if pd.isna(v1) or pd.isna(v2):
+                    per_col_match[col] = np.nan  # 表示未纳入统计
+                    continue
+
+                if numeric_flags[col]:
+                    # 数值列：容差判断（允许数字字符串）
+                    try:
+                        f1, f2 = float(v1), float(v2)
+                        ok = abs(f1 - f2) <= tolerance
+                    except Exception:
+                        ok = (v1 == v2)
+                else:
+                    # 字符/类别精确匹配
+                    ok = (v1 == v2)
+
+                per_col_match[col] = bool(ok)
+                considered += 1
+                matched += int(ok)
+
+            score = (matched / considered) if considered > 0 else 0.0
+            return per_col_match, score
+
+        # 4) 贪心匹配：为 df1 的每一行挑选 df2 中最优且未被占用的行
+        unused_df2_idx = set(df2.index.tolist())
+        records = []
+
+        for i1, r1 in df1.iterrows():
+            best = (-1.0, None, None)  # (score, idx2, per_col_match)
+            for i2 in list(unused_df2_idx):
+                r2 = df2.loc[i2]
+                per_col_match, score = row_similarity(r1, r2)
+                # 更高分优先；同分可按先遇到的 i2
+                if score > best[0]:
+                    best = (score, i2, per_col_match)
+
+            score, i2, per_col_match = best
+            if i2 is not None:
+                unused_df2_idx.remove(i2)
+
+            row_out = {
+                "df1_index": i1,
+                "matched_df2_index": i2,
+                "match_score": float(max(score, 0.0)),
+            }
+            # 展开每列是否匹配
+            for col, ok in (per_col_match or {}).items():
+                row_out[f"match_{col}"] = ok
                 
-                # 5. 如果找到匹配，记录 df1 的索引并跳出内层循环
-                if match:
-                    matched_indices.append(idx1)
-                    break
+            records.append(row_out)
+
+        matches_df = pd.DataFrame.from_records(records).set_index("df1_index")
+        matches_df['AllMatch'] = matches_df.loc[:, matches_df.columns.str.contains("match_Attribute")].all(axis=1)
+        matches_df.loc['mean'] = matches_df.iloc[:, 1:].mean()
         
-        # 6. 返回匹配成功的 df1 行
-        return df1.loc[matched_indices]
+        return matches_df
 
     def clear_new_elems(self):
         self.elem_df = self.elem_df[~self.elem_df.index.str.startswith('NewElem')]
@@ -312,7 +363,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
 
 
 
-    hypothesis_result = ab_agent.generate_hypothesis(sorted_state, main_attr, history)
+    hypothesis_result = ab_agent.generate_hypothesis(table.elem_df.__str__(), main_attr, history)
 
 
     hypothesis = hypothesis_result['hypothesis']
@@ -395,9 +446,16 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print_and_enter(matched_df)
     n_matched = matched_df.shape[0]
     matched_elem_str = table.state_as_long_str(matched_df)
-    match_rate = n_matched / new_elem_df.shape[0]
+    mean_rate = matched_df.loc['mean']
+    AllPass_rate = mean_rate['AllMatch']
+    eval_score = mean_rate.iloc[2:]
+    # 对应权重0.15, 0.4, 0.15, 0.15, 0.15
+    match_rate = mean_rate[matched_df.columns.str.contains('match_Attribute')].values @ np.array([0.4, 0.15, 0.15, 0.15, 0.15]).T
+    print_and_enter(f'AllPass Rate: {AllPass_rate}')
     print_and_enter(f'Match Rate: {match_rate}')
-    eval_result = in_agent.evaluate_hypothesis(state, hypothesis, matched_elem_str, match_rate)
+    print_and_enter(f'eval score:\n{eval_score.__str__()}')
+    
+    eval_result = in_agent.evaluate_hypothesis(state, hypothesis, matched_elem_str, eval_score.__str__())
     evaluation = eval_result['evaluation']
     decision = eval_result['decision']
 
@@ -408,7 +466,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print('decision:')
     print_and_enter(in_agent.options[decision])
 
-    history.update_records(hypothesis, evaluation, match_rate, main_attr, ascending, code, inverse_code)
+    history.update_records(hypothesis, evaluation, match_rate, eval_score.__str__(), main_attr, ascending, code, inverse_code)
 
     return table, history, decision, matched_df
 
@@ -449,11 +507,11 @@ if __name__ == '__main__':
     # Optionally load previous records from a specific log
     # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
-    logger = Logger(join(data_path, 'logs'))
-    max_iter = 5
+    logger = Logger(join(data_path, 'logs', '30x10x5attribute'))
+    max_iter = 10
     max_retries = 3
     decision = 'C'
-    patience = 3
+    patience = 5
     min_delta = 0
     min_iters = 3
     stopper = EarlyStopper(patience=patience, min_delta=min_delta, min_iters=min_iters)
@@ -485,6 +543,7 @@ if __name__ == '__main__':
             table, history, decision, matched_df = stopper.best_payload
         final_df = table.elem_df.copy()
         # 新增 KnownAndMatched 列
+        matched_df = matched_df[matched_df['AllMatch'] == True]
         matched_elements = set(matched_df.index) if matched_df is not None else set()
         final_df['KnownAndMatched'] = final_df.index.map(
             lambda elem: 'Known' if not str(elem).startswith('NewElem') 
@@ -495,6 +554,7 @@ if __name__ == '__main__':
         logger.log_table_as_csv(final_df)
         logger.log_table_as_img(final_df)
     except Exception as e:
+        traceback.print_exc()
         print(f"Error: {e}")
     finally:
         logger.close()
