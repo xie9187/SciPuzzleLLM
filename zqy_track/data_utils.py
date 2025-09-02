@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import sys
 import re
@@ -7,7 +8,11 @@ from os.path import join
 from viz_utils import create_periodic_table_plot
 from table_agents_v2 import RecordAgent
 import pandas as pd
-from io import StringIO
+from dataclasses import dataclass
+from typing import Optional, Iterable, Dict, List, Tuple
+import numpy as np
+from pandas.api.types import is_numeric_dtype
+
 def print_and_enter(content):
     print(content)
     print(' ')
@@ -144,7 +149,7 @@ class History(object):
             if match_rate_match:
                 match_rate = float(match_rate_match.group(1))
 
-            eval_score_match = re.search(r"Eval Score:\s*(.*?)\s*Name:\s*mean", iter_content, flags=re.S)
+            eval_score_match = re.search(r"eval score:\s*(.*?)\s*Name:\s*mean", iter_content, flags=re.S)
 
             # to get eval score from logs
             if eval_score_match:
@@ -190,8 +195,161 @@ class History(object):
             return json_response
             
 
+@dataclass(frozen=True)
+class Attribute:
+    """
+    表示单个属性（数值/离散），并能计算自身的属性空间大小。
+    - 数值属性：按 bin = floor(value / tolerance) 离散（锚定 0）
+    - 离散属性：非空唯一值计数
+    """
+    name: str
+    kind: str  # "numeric" | "categorical"
+    tolerance: Optional[float] = None  # 仅 numeric 使用
+
+    @staticmethod
+    def numeric(name: str, tolerance: float) -> "Attribute":
+        if tolerance is None or tolerance <= 0:
+            raise ValueError(f"tolerance for numeric attribute '{name}' must be > 0")
+        return Attribute(name=name, kind="numeric", tolerance=tolerance)
+
+    @staticmethod
+    def categorical(name: str) -> "Attribute":
+        return Attribute(name=name, kind="categorical", tolerance=None)
+
+    # --------- 计算空间大小 ---------
+    def space_size(self, series: pd.Series) -> int:
+        """
+        计算该属性在给定数据（通常是训练子集）上的空间大小。
+        对于不存在/空列，返回 0。
+        """
+        if series is None or len(series) == 0:
+            return 0
+
+        if self.kind == "numeric":
+            tol = self.tolerance
+            if tol is None or tol <= 0:
+                raise ValueError(f"numeric attribute '{self.name}' requires a positive tolerance")
+
+            # 过滤 NaN/非有限值
+            s = pd.to_numeric(series, errors="coerce")
+            s = s[np.isfinite(s.values)]
+            if s.empty:
+                return 0
+
+            # 按 floor(x / tol) 分箱
+            bins = np.floor(s.values / tol).astype(np.int64, copy=False)
+            # 唯一 bin 数
+            return int(pd.Series(bins).nunique(dropna=True))
+
+        elif self.kind == "categorical":
+            s = series[pd.notna(series)]
+            if s.empty:
+                return 0
+            # 直接唯一值计数（空字符串视为有效类别）
+            return int(pd.Series(s).astype(object).nunique(dropna=True))
+
+        else:
+            raise ValueError(f"unknown attribute kind: {self.kind}")
+
+
+class AttributeSet:
+    """
+    属性集合：负责
+      - 推断 DF 中的数值/离散属性并构造 Attribute 列表
+      - 计算每个属性的空间、总空间、以及占比
+    支持“数据绑定”：先 bind(df) 或 infer_from_df(..., bind_df=True)，
+    后续可不再传 df 参数。
+    """
+
+    def __init__(self, attributes: List[Attribute], test_flag: str = "Test", bound_df: Optional[pd.DataFrame] = None):
+        self.attributes: List[Attribute] = attributes
+        self.test_flag: str = test_flag
+        self._bound_df: Optional[pd.DataFrame] = bound_df
+
+    @staticmethod
+    def infer_from_df(
+        df: pd.DataFrame,
+        test_flag: str = "Test",
+        numeric_tolerances: Optional[Dict[str, float]] = None,
+        default_tolerance: float = 0.1,
+        bind_df: bool = False,
+        exclude: List[str] = [],
+    ) -> "AttributeSet":
+        """
+        根据 DF 的 dtype 推断数值/离散列（排除 test_flag），
+        为数值列应用 numeric_tolerances 或 default_tolerance。
+        若 bind_df=True，将把 df 绑定进返回的 AttributeSet，之后可直接调用无参计算方法。
+        """
+        if numeric_tolerances is None:
+            numeric_tolerances = {}
+
+        attributes: List[Attribute] = []
+        for col in df.columns:
+            if col == test_flag:
+                continue
+            if col in exclude:
+                continue
+            if is_numeric_dtype(df[col]):
+                tol = numeric_tolerances.get(col, default_tolerance)
+                attributes.append(Attribute.numeric(col, tol))
+            else:
+                attributes.append(Attribute.categorical(col))
+
+        return AttributeSet(attributes=attributes, test_flag=test_flag, bound_df=(df if bind_df else None))
+
+    # --------- 绑定数据（可链式调用）---------
+    def bind(self, df: pd.DataFrame) -> "AttributeSet":
+        """
+        绑定一个 DataFrame 到当前实例。绑定后，space_sizes/total_space/space_shares
+        可不再传入 df 参数。
+        注意：这里保存的是引用。如果希望“快照”，请自行传入 df.copy()。
+        """
+        self._bound_df = df
+        return self
+
+    # --------- 工具：解析 df 来源 ---------
+    def _resolve_df(self, df: Optional[pd.DataFrame]) -> pd.DataFrame:
+        if df is not None:
+            return df
+        if self._bound_df is not None:
+            return self._bound_df
+        raise ValueError("No DataFrame provided. Call .bind(df) first or pass df as an argument.")
+
+    # --------- 取训练子集 ---------
+    def _training_subset(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.test_flag in df.columns:
+            mask = df[self.test_flag] == False  # noqa: E712
+            return df.loc[mask]
+        return df
 
     
+    # --------- 计算：每列空间大小 ---------
+    def space_sizes(self, df: Optional[pd.DataFrame] = None) -> Dict[str, int]:
+        df = self._resolve_df(df)
+        train_df = self._training_subset(df)
+        result: Dict[str, int] = {}
+        for attr in self.attributes:
+            series = train_df[attr.name] if attr.name in train_df.columns else pd.Series(dtype="float64")
+            result[attr.name] = attr.space_size(series)
+        return result
+
+    # --------- 计算：总空间大小（加和） ---------
+    def total_space(self, df: Optional[pd.DataFrame] = None) -> int:
+        sizes = self.space_sizes(df)
+        total = 0
+        for size in sizes.values():
+            total += int(size)
+            if total == 0:
+                return 0
+        return int(total)
+
+    # --------- 计算：各属性空间占比 ---------
+    def space_shares(self, df: Optional[pd.DataFrame] = None) -> Dict[str, float]:
+        sizes = self.space_sizes(df)
+        total = self.total_space(df)
+        if total == 0:
+            return {k: 0.0 for k in sizes.keys()}
+        return {k: (v / total) for k, v in sizes.items()}
 
 def execute_function(code_str, func_name, df):
     namespace = {}

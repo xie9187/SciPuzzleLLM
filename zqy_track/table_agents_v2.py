@@ -24,7 +24,7 @@ class Agent(object):
         response = client.chat.completions.create(
             model=self.model,
             messages=prompt_msgs,
-            timeout=60,  # 添加60秒超时
+            timeout=100,  # 添加60秒超时
         )
         response_time = time.time() - start_time
         print(f'Got response from {self.model} in {response_time:.1f} sec.')

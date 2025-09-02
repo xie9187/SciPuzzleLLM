@@ -160,7 +160,18 @@ class TableState(object):
         self.elem_df['row'] = None
         self.elem_df['col'] = None
         self.test_df = test_df
-
+    
+    def infer_aset(self, numeric_tolerances, exclude):
+        self.aset = AttributeSet.infer_from_df(
+            df=self.elem_df,
+            test_flag="Test",
+            numeric_tolerances=numeric_tolerances,
+            bind_df=True,
+            exclude = exclude
+            # 可选：为数值列提供 tol
+        )
+        return self.aset
+    
     def fill_elem_posi(self, actions):
         for elem, row, col in actions:
             self.elem_df.loc[elem, ['col', 'row']] = [row, col]
@@ -227,44 +238,37 @@ class TableState(object):
 
 
 
-    def find_matched_elements(self, df1, df2, tolerance=4.0):
+    def find_matched_elements(self, df1):
 
         """
-        以 df1 的顺序逐个样本在 df2 中寻找最相似样本，匹配后不放回（贪心匹配）。
-        相似度 = 交集列上逐列“是否匹配”的加权平均（此处等权），满分 1.0。
-        - 数值列:  |v1 - v2| <= tolerance 视为匹配
+        以 df1 的顺序逐个样本在 test_df 中寻找最相似样本，匹配后不放回（贪心匹配）。
+        相似度 = 交集列上逐列"是否匹配"的加权平均（使用 space_shares 作为权重），满分 1.0。
+        - 数值列: |v1 - v2| <= attribute.tolerance 视为匹配
         - 非数值列: v1 == v2 视为匹配
         返回
-        matches_df: 逐样本匹配报告（包含 df1 索引、匹配到的 df2 索引、每列是否匹配、总体得分）
+        matches_df: 逐样本匹配报告（包含 df1 索引、匹配到的 test_df 索引、每列是否匹配、总体得分）
         col_match_rate: 各列平均匹配率（只统计参与比较的样本对；若某样本该列有 NaN 则跳过该对）
         约束
-        - 要求 len(df1) == len(df2)
+        - 要求 len(df1) == len(test_df)
         """
-        if len(df1) != len(df2):
-            raise ValueError("df1 与 df2 的样本量必须相等。")
+        if len(df1) != len(self.test_df):
+            raise ValueError("df1 与 test_df 的样本量必须相等。")
 
         # 1) 列交集（并排除 row/col 等不参与列）
-        common_cols = [c for c in df1.columns if c in df2.columns]
+        common_cols = [c for c in df1.columns if c in self.test_df.columns]
         if not common_cols:
             raise ValueError("两个 DataFrame 没有可比较的公共列。")
 
-        # 2) 预先判断哪些列视为数值列（注意：dtype 可能是 object，但内容是数字）
-        def is_numeric_col(s1: pd.Series, s2: pd.Series, valid_threshold: float = 0.8) -> bool:
-            # 更稳健的判定：若两列都能大部分转换为数字，就当数值列
-            c1 = pd.to_numeric(s1, errors="coerce")
-            c2 = pd.to_numeric(s2, errors="coerce")
-            valid_ratio = (
-                (c1.notna() & c2.notna()).sum() / max(1, len(s1))
-            )
-            return valid_ratio >= valid_threshold  # 阈值可调
-
-        numeric_flags = {col: is_numeric_col(df1[col], df2[col]) for col in common_cols}
+        # 2) 创建属性映射字典和获取权重
+        attr_dict = {attr.name: attr for attr in self.aset.attributes}
+        weights = self.aset.space_shares()
 
         # 3) 打分函数（返回列级是否匹配的布尔字典 + 总分）
         def row_similarity(r1: pd.Series, r2: pd.Series):
             per_col_match = {}
-            considered = 0
-            matched = 0
+            total_weight = 0
+            weighted_sum = 0
+            
             for col in common_cols:
                 v1, v2 = r1[col], r2[col]
                 # 缺失值：跳过该列
@@ -272,32 +276,42 @@ class TableState(object):
                     per_col_match[col] = np.nan  # 表示未纳入统计
                     continue
 
-                if numeric_flags[col]:
-                    # 数值列：容差判断（允许数字字符串）
-                    try:
-                        f1, f2 = float(v1), float(v2)
-                        ok = abs(f1 - f2) <= tolerance
-                    except Exception:
+                # 使用 aset.attribute 获取属性信息
+                if col in attr_dict:
+                    attr = attr_dict[col]
+                    if attr.kind == "numeric":
+                        # 数值列：容差判断（允许数字字符串）
+                        try:
+                            f1, f2 = float(v1), float(v2)
+                            ok = abs(f1 - f2) <= attr.tolerance
+                        except Exception:
+                            ok = (v1 == v2)
+                    else:
+                        # 字符/类别精确匹配
                         ok = (v1 == v2)
                 else:
-                    # 字符/类别精确匹配
+                    # 如果列不在属性中，默认精确匹配
                     ok = (v1 == v2)
 
                 per_col_match[col] = bool(ok)
-                considered += 1
-                matched += int(ok)
+                
+                # 加权计算
+                if not pd.isna(ok):
+                    weight = weights.get(col, 0)
+                    weighted_sum += int(ok) * weight
+                    total_weight += weight
 
-            score = (matched / considered) if considered > 0 else 0.0
+            score = weighted_sum / total_weight if total_weight > 0 else 0.0
             return per_col_match, score
 
         # 4) 贪心匹配：为 df1 的每一行挑选 df2 中最优且未被占用的行
-        unused_df2_idx = set(df2.index.tolist())
+        unused_df2_idx = set(self.test_df.index.tolist())
         records = []
 
         for i1, r1 in df1.iterrows():
             best = (-1.0, None, None)  # (score, idx2, per_col_match)
             for i2 in list(unused_df2_idx):
-                r2 = df2.loc[i2]
+                r2 = self.test_df.loc[i2]
                 per_col_match, score = row_similarity(r1, r2)
                 # 更高分优先；同分可按先遇到的 i2
                 if score > best[0]:
@@ -441,7 +455,8 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     in_agent = agents['in_agent']
 
     new_elem_df = table.elem_df[table.elem_df.index.str.contains("NewElem")]
-    matched_df = table.find_matched_elements(new_elem_df, table.test_df)
+    
+    matched_df = table.find_matched_elements(new_elem_df)
     print('matched elements')
     print_and_enter(matched_df)
     n_matched = matched_df.shape[0]
@@ -450,8 +465,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     AllPass_rate = mean_rate['AllMatch']
     eval_score = mean_rate.iloc[2:]
     # 对应权重0.15, 0.4, 0.15, 0.15, 0.15
-    match_rate = mean_rate[matched_df.columns.str.contains('match_Attribute')].values @ np.array([0.4, 0.15, 0.15, 0.15, 0.15]).T
-    print_and_enter(f'AllPass Rate: {AllPass_rate}')
+    match_rate = mean_rate['match_score']
     print_and_enter(f'Match Rate: {match_rate}')
     print_and_enter(f'eval score:\n{eval_score.__str__()}')
     
@@ -495,7 +509,7 @@ if __name__ == '__main__':
     test_df = pd.read_csv(join(data_path, 'test_df.csv'), index_col='Element')
 
     table = TableState(train_df, test_df)
-    
+    table.infer_aset(numeric_tolerances={"Attribute2": 4, "Attribute3": 1}, exclude=['Element', 'row', 'col'])
     agents = {
         'ab_agent': AbductionAgent(),
         'de_agent': DeductionAgent(),
