@@ -6,11 +6,16 @@ import sys
 from pymatgen.core.periodic_table import Element
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
-from table_agents_v2 import *
-from data_utils import *
-from code_executor import enhanced_code_execution
-from evaluation import EarlyStopper
+try:
+    from table_agents_v2 import *
+    from data_utils import *
+    from code_executor import enhanced_code_execution
+    from evaluation import EarlyStopper
+except Exception:
+    # Allow lightweight imports when only using data-generation utilities
+    pass
 import traceback
+
 def generate_table():
     # 初始化数据列表
     element_data = []
@@ -174,7 +179,7 @@ class TableState(object):
     
     def fill_elem_posi(self, actions):
         for elem, row, col in actions:
-            self.elem_df.loc[elem, ['col', 'row']] = [row, col]
+            self.elem_df.loc[elem, ['row', 'col']] = [row, col]
 
     def append_new_elem(self, elems):
         for elem_attr in elems:
@@ -464,7 +469,6 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     mean_rate = matched_df.loc['mean']
     AllPass_rate = mean_rate['AllMatch']
     eval_score = mean_rate.iloc[2:]
-    # 对应权重0.15, 0.4, 0.15, 0.15, 0.15
     match_rate = mean_rate['match_score']
     print_and_enter(f'Match Rate: {match_rate}')
     print_and_enter(f'eval score:\n{eval_score.__str__()}')
@@ -507,7 +511,7 @@ if __name__ == '__main__':
 
     train_df = pd.read_csv(join(data_path, 'train_df.csv'), index_col='Element')
     test_df = pd.read_csv(join(data_path, 'test_df.csv'), index_col='Element')
-
+    # predict_vacancy(train_df)
     table = TableState(train_df, test_df)
     table.infer_aset(numeric_tolerances={"Attribute2": 4, "Attribute3": 1}, exclude=['Element', 'row', 'col'])
     agents = {
