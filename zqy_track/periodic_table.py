@@ -6,14 +6,13 @@ import sys
 from pymatgen.core.periodic_table import Element
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
-try:
-    from table_agents_v2 import *
-    from data_utils import *
-    from code_executor import enhanced_code_execution
-    from evaluation import EarlyStopper
-except Exception:
-    # Allow lightweight imports when only using data-generation utilities
-    pass
+
+from table_agents_v2 import *
+from data_utils import *
+from code_executor import enhanced_code_execution
+from evaluation import EarlyStopper
+from  valence_detection import robust_multiscale_gap_voting
+from TableState import TableState
 import traceback
 
 def generate_table():
@@ -157,204 +156,9 @@ def mask_table(df: pd.DataFrame, known_to_mendeleev: bool = True) -> pd.DataFram
 
     return train_df, test_df
 
-class TableState(object):
-    def __init__(self, elem_df, test_df):
-        super(TableState, self).__init__()
-        self.elem_df = elem_df
-        self.elem_attrs = list(elem_df.columns)
-        self.elem_df['row'] = None
-        self.elem_df['col'] = None
-        self.test_df = test_df
-    
-    def infer_aset(self, numeric_tolerances, exclude):
-        self.aset = AttributeSet.infer_from_df(
-            df=self.elem_df,
-            test_flag="Test",
-            numeric_tolerances=numeric_tolerances,
-            bind_df=True,
-            exclude = exclude
-            # 可选：为数值列提供 tol
-        )
-        return self.aset
-    
-    def fill_elem_posi(self, actions):
-        for elem, row, col in actions:
-            self.elem_df.loc[elem, ['row', 'col']] = [row, col]
-
-    def append_new_elem(self, elems):
-        for elem_attr in elems:
-            # elem_attr = [str(val) for val in elem_attr]
-            self.elem_df.loc[elem_attr[0]] = elem_attr[1:] 
-        
-    def sort_table(self, sort_col, ascending=True):
-        self.raw_df = self.elem_df.copy()
-        self.elem_df = self.elem_df.sort_values(sort_col, ascending=ascending)
-
-    def state_as_long_str(self, df=None):
-        if df is None:
-            return self.elem_df.to_string(index=True)
-        else:
-            return df.to_string(index=True)
-
-    def att_table(self, attr_name):
-        """
-        生成属性值的表格可视化字符串
-        参数:
-            attr_name: 要显示的属性列名 
-        返回:
-            对齐的表格字符串，空白位置用空字符串表示
-        """
-        # 检查是否有元素已填入表格
-        if self.elem_df[['col', 'row']].isna().all().all():
-            return 'No element in table currently.'
-        
-        # 获取表格的行列范围
-        max_row = int(self.elem_df['row'].max())
-        max_col = int(self.elem_df['col'].max())
-        
-        # 创建空表格 (row+1行 x col+1列，因为从0或1开始计数)
-        table = np.empty((max_row, max_col), dtype=object)
-        table.fill('')
-        
-        # 填充已填入的元素
-        filled = self.elem_df.dropna(subset=['col', 'row'])
-        for _, row in filled.iterrows():
-            r = int(row['row']) - 1  # 转换为0-based索引
-            c = int(row['col']) - 1
-            if 0 <= r < max_row and 0 <= c < max_col:
-                attr_value = row[attr_name]
-                if pd.api.types.is_float(attr_value) and not pd.isna(attr_value):
-                    table[r, c] = f"{float(attr_value):.1f}"
-                else:
-                    table[r, c] = str(attr_value)
-        
-        # 计算每列最大宽度
-        col_widths = [max(len(str(cell)) for cell in col) for col in table.T]
-        
-        # 生成表格字符串
-        table_lines = []
-        for r in range(max_row):
-            line = '|' + ', '.join(
-                f" {table[r, c]:^{col_widths[c]}} " for c in range(max_col)
-            ) + '|'
-            table_lines.append(line)
-        
-        return '\n'.join(table_lines)
 
 
-
-    def find_matched_elements(self, df1):
-
-        """
-        以 df1 的顺序逐个样本在 test_df 中寻找最相似样本，匹配后不放回（贪心匹配）。
-        相似度 = 交集列上逐列"是否匹配"的加权平均（使用 space_shares 作为权重），满分 1.0。
-        - 数值列: |v1 - v2| <= attribute.tolerance 视为匹配
-        - 非数值列: v1 == v2 视为匹配
-        返回
-        matches_df: 逐样本匹配报告（包含 df1 索引、匹配到的 test_df 索引、每列是否匹配、总体得分）
-        col_match_rate: 各列平均匹配率（只统计参与比较的样本对；若某样本该列有 NaN 则跳过该对）
-        约束
-        - 要求 len(df1) == len(test_df)
-        """
-        if len(df1) != len(self.test_df):
-            raise ValueError("df1 与 test_df 的样本量必须相等。")
-
-        # 1) 列交集（并排除 row/col 等不参与列）
-        common_cols = [c for c in df1.columns if c in self.test_df.columns]
-        if not common_cols:
-            raise ValueError("两个 DataFrame 没有可比较的公共列。")
-
-        # 2) 创建属性映射字典和获取权重
-        attr_dict = {attr.name: attr for attr in self.aset.attributes}
-        weights = self.aset.space_shares()
-
-        # 3) 打分函数（返回列级是否匹配的布尔字典 + 总分）
-        def row_similarity(r1: pd.Series, r2: pd.Series):
-            per_col_match = {}
-            total_weight = 0
-            weighted_sum = 0
-            
-            for col in common_cols:
-                v1, v2 = r1[col], r2[col]
-                # 缺失值：跳过该列
-                if pd.isna(v1) or pd.isna(v2):
-                    per_col_match[col] = np.nan  # 表示未纳入统计
-                    continue
-
-                # 使用 aset.attribute 获取属性信息
-                if col in attr_dict:
-                    attr = attr_dict[col]
-                    if attr.kind == "numeric":
-                        # 数值列：容差判断（允许数字字符串）
-                        try:
-                            f1, f2 = float(v1), float(v2)
-                            ok = abs(f1 - f2) <= attr.tolerance
-                        except Exception:
-                            ok = (v1 == v2)
-                    else:
-                        # 字符/类别精确匹配
-                        ok = (v1 == v2)
-                else:
-                    # 如果列不在属性中，默认精确匹配
-                    ok = (v1 == v2)
-
-                per_col_match[col] = bool(ok)
-                
-                # 加权计算
-                if not pd.isna(ok):
-                    weight = weights.get(col, 0)
-                    weighted_sum += int(ok) * weight
-                    total_weight += weight
-
-            score = weighted_sum / total_weight if total_weight > 0 else 0.0
-            return per_col_match, score
-
-        # 4) 贪心匹配：为 df1 的每一行挑选 df2 中最优且未被占用的行
-        unused_df2_idx = set(self.test_df.index.tolist())
-        records = []
-
-        for i1, r1 in df1.iterrows():
-            best = (-1.0, None, None)  # (score, idx2, per_col_match)
-            for i2 in list(unused_df2_idx):
-                r2 = self.test_df.loc[i2]
-                per_col_match, score = row_similarity(r1, r2)
-                # 更高分优先；同分可按先遇到的 i2
-                if score > best[0]:
-                    best = (score, i2, per_col_match)
-
-            score, i2, per_col_match = best
-            if i2 is not None:
-                unused_df2_idx.remove(i2)
-
-            row_out = {
-                "df1_index": i1,
-                "matched_df2_index": i2,
-                "match_score": float(max(score, 0.0)),
-            }
-            # 展开每列是否匹配
-            for col, ok in (per_col_match or {}).items():
-                row_out[f"match_{col}"] = ok
-                
-            records.append(row_out)
-
-        matches_df = pd.DataFrame.from_records(records).set_index("df1_index")
-        matches_df['AllMatch'] = matches_df.loc[:, matches_df.columns.str.contains("match_Attribute")].all(axis=1)
-        matches_df.loc['mean'] = matches_df.iloc[:, 1:].mean()
-        
-        return matches_df
-
-    def clear_new_elems(self):
-        self.elem_df = self.elem_df[~self.elem_df.index.str.startswith('NewElem')]
-
-    def get_complete_state(self):
-        state_str = 'All elements:\n'
-        state_str += self.state_as_long_str() + '\n\n'
-        for attr in self.elem_attrs:
-            state_str += f'{attr} of current elements in virtual periodic table\n'
-            state_str += self.att_table(attr) + '\n\n'
-        return state_str
-
-def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
+def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2, predict_element=10):
     table.clear_new_elems()
     state = table.get_complete_state()
 
@@ -363,16 +167,19 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     ab_agent = agents['ab_agent']
     if decision == 'C':
         
-        attribute_result = ab_agent.select_main_attribute(state, history)
-        main_attr = attribute_result['attribute']
-        ascending = attribute_result['ascending'].lower() == 'true'
+        # attribute_result = ab_agent.select_main_attribute(state, history)
+        # main_attr = attribute_result['attribute']
+        # # 按照 Abduction 的判断决定升降序
+        # ascending = attribute_result['ascending'].lower() == 'true'
+        main_attr = 'Attribute2'
+        ascending = True
         table.sort_table(main_attr, ascending=ascending)
         sorted_state = table.get_complete_state()
 
-        print('Reasoning:')
-        print_and_enter(attribute_result["reasoning"])
-        print('Main attribute:')
-        print_and_enter(main_attr + f' ascending={ascending}')
+        # print('Reasoning:')
+        # print_and_enter(attribute_result["reasoning"])
+        # print('Main attribute:')
+        # print_and_enter(main_attr + f' ascending={ascending}')
     else:
 
         main_attr = history.records[-1]['attribute']
@@ -380,10 +187,49 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
         table.sort_table(main_attr, ascending=ascending)
         sorted_state = table.get_complete_state()
 
+    # 在生成假设之前：基于主属性进行多尺度空隙投票，挑选空位并在表中插入 NewElem0-9
+
+    series = pd.to_numeric(table.elem_df[main_attr], errors='coerce')
+    series = series.dropna()
+    ordered_names = list(series.index)
+    ordered_vals = series.values
+
+    selected_pairs = []  # list[(left_elem, right_elem)]
+    if len(ordered_vals) >= 3:
+        gap_df = robust_multiscale_gap_voting(
+            ordered_vals,
+            k=1.0,
+            trim=0.1,
+            exclude_self=True,
+            weighted=True,
+            multi_scales=[3, 5, 7],
+            min_ctx=3,
+            min_votes=2,
+        )
+        # 附上左右元素名称，gap_index 从 1 开始
+        left_names = [ordered_names[i] for i in range(len(ordered_vals) - 1)]
+        right_names = [ordered_names[i+1] for i in range(len(ordered_vals) - 1)]
+        gap_df['left_elem'] = left_names
+        gap_df['right_elem'] = right_names
+
+        # 仅保留 is_outlier 行，转为文本供 agent 选择
+        out_df = gap_df[gap_df.get('is_outlier', False) == True].copy()
+        cols = ['gap_index', 'left_elem', 'left_value', 'right_value', 'right_elem', 'gap_value', 'score', 'votes', 'best_win']
+        cols = [c for c in cols if c in out_df.columns]
+        outlier_table_text = out_df[cols].to_string(index=False) if not out_df.empty else ""
+
+        # 交给 Agent 挑选；若返回不足 10 个，后续我们再补齐
+        sel_ret = ab_agent.select_gap_candidates(sorted_state, main_attr, ascending, outlier_table_text, n=predict_element)
+        selected = sel_ret.get('selected', [])
+        # 规范化为 (left_elem, right_elem)
+        gap_alignment(predict_element, selected_pairs, gap_df, selected)
+
+    # 将选出的空位插入到 elem_df 中，命名为 NewElem0..9
+    table.gap_filling(predict_element, main_attr, ascending, selected_pairs)
 
 
-    hypothesis_result = ab_agent.generate_hypothesis(table.elem_df.__str__(), main_attr, history)
-
+    hypothesis_result = ab_agent.generate_hypothesis(table.elem_df.__str__(), main_attr, ascending, history)
+    
 
     hypothesis = hypothesis_result['hypothesis']
     code = hypothesis_result['code']
@@ -392,7 +238,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     # 使用增强的代码执行系统
 
     execution_result = enhanced_code_execution(
-        code, func_name, table.elem_df.copy(), hypothesis, max_retries, threshold=0.5
+        code, func_name, table.elem_df.copy(), hypothesis, max_retries, threshold=0.2
     )
     
     if not execution_result['success']:
@@ -415,20 +261,22 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print_and_enter(code)
 
     table.fill_elem_posi(actions)
-    state = table.get_complete_state()
+    
 
     # deduction
     print(logger.new_part('Deduction Process'))
     de_agent = agents['de_agent']
-
-    pred_result = de_agent.predict_elements(state, hypothesis, code, history, n=10)
-    new_elems_posi = pred_result['new_elems_posi']
-    inverse_code = pred_result['inverse_code']
+    pred_numeric_result = de_agent.predict_numeric(table)
+    state = table.get_complete_state()
+    pred_result = de_agent.predict_discrete_categorical_attribute(
+        state, hypothesis, history, n=predict_element
+    )
+    deduct_code = pred_result['code']
     func_name = pred_result['func_name']
     
     # 使用增强的代码执行系统
     execution_result = enhanced_code_execution(
-        inverse_code, func_name, (new_elems_posi, table.elem_df.copy()), 
+        deduct_code, func_name, (table.elem_df.copy()), 
         f"根据元素位置预测元素属性，符合假设: {hypothesis}", max_retries, threshold=0.5
     )
     
@@ -437,7 +285,14 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
         raise Exception(f"无法生成可执行的反向代码: {execution_result['error']}")
     
     new_elems = execution_result['result']
-    
+
+    # 将预测的属性值填回表中（覆盖已有 NewElem 行的空值/占位）
+    try:
+        if isinstance(new_elems, list) and len(new_elems) > 0:
+            table.append_new_elem(new_elems)
+    except Exception as e:
+        print(f"填充预测值到表时出错: {e}")
+
     # 显示执行详情
     print(f"✅ 反向代码执行成功，尝试次数: {execution_result['attempts']}")
 
@@ -446,12 +301,9 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
 
     print('Reasoning:')
     print_and_enter(pred_result["reasoning"])
-    print('New elem position:')
-    print(new_elems_posi)
-    print('Inverse code:')
-    print_and_enter(inverse_code)
+    print('Deduction code:')
+    print_and_enter(deduct_code)
 
-    table.append_new_elem(new_elems)
     state = table.get_complete_state()
     print(state)
 
@@ -484,9 +336,35 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2):
     print('decision:')
     print_and_enter(in_agent.options[decision])
 
-    history.update_records(hypothesis, evaluation, match_rate, eval_score.__str__(), main_attr, ascending, code, inverse_code)
+    history.update_records(hypothesis, evaluation, match_rate, eval_score.__str__(), main_attr, ascending, code, deduct_code)
 
     return table, history, decision, matched_df
+
+
+
+def gap_alignment(predict_element, selected_pairs, gap_df, selected):
+    for _, le, re in selected:
+        if le and re:
+            selected_pairs.append((str(le), str(re)))
+
+        # 若不足 10 个，用剩余 gap 依据分数/间隙大小补齐，避免重复
+    if len(selected_pairs) < predict_element:
+        rest = gap_df.copy()
+            # 首选 is_outlier、score 高、gap_value 大
+        sort_cols = [c for c in ['is_outlier', 'score', 'gap_value'] if c in rest.columns]
+        if sort_cols:
+            ascending_flags = [False for _ in sort_cols]
+            rest = rest.sort_values(sort_cols, ascending=ascending_flags)
+        for _, r in rest.iterrows():
+            le = str(r.get('left_elem', ''))
+            re = str(r.get('right_elem', ''))
+            if not le or not re:
+                continue
+            pair = (le, re)
+            if pair not in selected_pairs:
+                selected_pairs.append(pair)
+            if len(selected_pairs) >= predict_element:
+                break
 
 if __name__ == '__main__':
     if sys.platform == 'win32':
@@ -511,7 +389,6 @@ if __name__ == '__main__':
 
     train_df = pd.read_csv(join(data_path, 'train_df.csv'), index_col='Element')
     test_df = pd.read_csv(join(data_path, 'test_df.csv'), index_col='Element')
-    # predict_vacancy(train_df)
     table = TableState(train_df, test_df)
     table.infer_aset(numeric_tolerances={"Attribute2": 4, "Attribute3": 1}, exclude=['Element', 'row', 'col'])
     agents = {

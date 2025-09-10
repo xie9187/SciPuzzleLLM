@@ -205,12 +205,14 @@ class Attribute:
     name: str
     kind: str  # "numeric" | "categorical"
     tolerance: Optional[float] = None  # 仅 numeric 使用
+    # 对数值型做进一步标注："continuous" | "discrete"（可选，不影响现有逻辑）
+    numeric_type: Optional[str] = None
 
     @staticmethod
-    def numeric(name: str, tolerance: float) -> "Attribute":
+    def numeric(name: str, tolerance: float, numeric_type: Optional[str] = None) -> "Attribute":
         if tolerance is None or tolerance <= 0:
             raise ValueError(f"tolerance for numeric attribute '{name}' must be > 0")
-        return Attribute(name=name, kind="numeric", tolerance=tolerance)
+        return Attribute(name=name, kind="numeric", tolerance=tolerance, numeric_type=numeric_type)
 
     @staticmethod
     def categorical(name: str) -> "Attribute":
@@ -283,6 +285,21 @@ class AttributeSet:
         if numeric_tolerances is None:
             numeric_tolerances = {}
 
+        def _classify_numeric_unique(series: pd.Series, threshold: float = 0.7) -> str:
+            """
+            仅使用唯一值占比(unique_ratio)来区分：
+              - unique_ratio > threshold -> continuous
+              - 否则 -> discrete
+            空/无效样本时，按离散处理（保守）。
+            """
+            s = pd.to_numeric(series, errors="coerce")
+            s = s[np.isfinite(s.values)]
+            n = int(len(s))
+            if n <= 0:
+                return "discrete"
+            unique_ratio = float(pd.Series(s).nunique(dropna=True)) / n
+            return "continuous" if unique_ratio > threshold else "discrete"
+
         attributes: List[Attribute] = []
         for col in df.columns:
             if col == test_flag:
@@ -291,7 +308,8 @@ class AttributeSet:
                 continue
             if is_numeric_dtype(df[col]):
                 tol = numeric_tolerances.get(col, default_tolerance)
-                attributes.append(Attribute.numeric(col, tol))
+                numeric_type = _classify_numeric_unique(df[col])
+                attributes.append(Attribute.numeric(col, tol, numeric_type=numeric_type))
             else:
                 attributes.append(Attribute.categorical(col))
 

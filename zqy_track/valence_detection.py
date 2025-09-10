@@ -98,7 +98,6 @@ def _trimmed_weighted_stats(values: np.ndarray, weights: Optional[np.ndarray], t
 
 def robust_multiscale_gap_voting(
     x: Iterable[float],
-    win: int = 5,
     k: float = 1.0,
     trim: float = 0.1,
     exclude_self: bool = True,
@@ -131,8 +130,7 @@ def robust_multiscale_gap_voting(
     n_gap = len(gaps)
 
 
-    win = max(3, int(win))
-    scales = sorted(set([win] + (multi_scales or [])))
+    scales = multi_scales
 
     def ctx_bounds(i: int, w: int) -> tuple[int, int]:
         # Union of gaps covered by any window including gap i under window size w
@@ -340,153 +338,85 @@ def knn_gap_outliers(
     return pd.DataFrame(records)
 
 
-def _build_thresholds_from_gaps(sorted_values: np.ndarray, outlier_df: pd.DataFrame) -> list:
-    flags = outlier_df["is_outlier"].to_numpy().astype(bool)
-    thr = []
-    for i, flag in enumerate(flags):
-        if not flag:
-            continue
-        a = float(sorted_values[i])
-        b = float(sorted_values[i + 1])
-        thr.append(0.5 * (a + b))
-    return sorted(set(thr))
+def compute_gap_detection_metrics(outlier_df: pd.DataFrame, test_attr: pd.Series, inclusive: bool = False) -> dict:
+    """Metrics per user's definition using Attribute2 as the probe axis.
 
+    - True Positive (TP gaps): an outlier gap whose (left_value, right_value) interval contains ≥1 test value.
+    - False Positive (FP gaps): an outlier gap whose interval contains 0 test values.
+    - False Negative (FN points): a test value that is not inside any outlier gap.
+    - Recall uses point-level definition; Precision uses gap-level definition; F1 is their harmonic mean.
+    """
+    odf = outlier_df[outlier_df["is_outlier"] == True]
+    gaps = list(zip(odf["left_value"].astype(float).to_list(), odf["right_value"].astype(float).to_list()))
+    tv = pd.to_numeric(test_attr, errors="coerce").dropna().to_numpy(dtype=float)
+    n_gaps = len(gaps)
+    n_points = int(tv.size)
 
-def _assign_bin(value: float, thresholds: list) -> int:
-    import bisect
-    return bisect.bisect_right(thresholds, float(value))
+    # TP/FP for gaps
+    tp_gaps = 0
+    for (a, b) in gaps:
+        if a > b:
+            a, b = b, a
+        mask = (tv >= a) & (tv <= b) if inclusive else (tv > a) & (tv < b)
+        if np.any(mask):
+            tp_gaps += 1
+    fp_gaps = n_gaps - tp_gaps
 
+    # TP/FN for test points (covered by any predicted gap?)
+    covered = np.zeros(n_points, dtype=bool)
+    for (a, b) in gaps:
+        if a > b:
+            a, b = b, a
+        covered |= ((tv >= a) & (tv <= b)) if inclusive else ((tv > a) & (tv < b))
+    tp_points = int(np.sum(covered))
+    fn_points = n_points - tp_points
 
-def _majority_label(labels: np.ndarray):
-    if labels.size == 0:
-        return None
-    lab = labels[~pd.isna(labels)]
-    if lab.size == 0:
-        return None
-    vals, counts = np.unique(lab, return_counts=True)
-    return float(vals[np.argmax(counts)])
+    precision = tp_gaps / (tp_gaps + fp_gaps) if (tp_gaps + fp_gaps) > 0 else 0.0
+    recall = tp_points / (tp_points + fn_points) if (tp_points + fn_points) > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
-
-def _predict_by_bins(train_vals: np.ndarray, train_y: np.ndarray, test_vals: np.ndarray, thresholds: list) -> np.ndarray:
-    if len(thresholds) == 0:
-        maj = _majority_label(train_y)
-        return np.full(shape=len(test_vals), fill_value=maj if maj is not None else np.nan)
-    bin_count = len(thresholds) + 1
-    train_bins = np.array([_assign_bin(v, thresholds) for v in train_vals])
-    bin_labels = {}
-    for b in range(bin_count):
-        lab = train_y[train_bins == b]
-        bin_labels[b] = _majority_label(lab)
-    global_maj = _majority_label(train_y)
-    for b in range(bin_count):
-        if bin_labels[b] is None:
-            bin_labels[b] = global_maj
-    preds = np.array([bin_labels[_assign_bin(v, thresholds)] for v in test_vals], dtype=float)
-    return preds
-
-
-def _compute_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    mask = ~(pd.isna(y_true) | pd.isna(y_pred))
-    yt = y_true[mask]
-    yp = y_pred[mask]
-    if yt.size == 0:
-        return {"support": 0}
-    support = int(yt.size)
-    accuracy = float(np.mean(yt == yp))
-    classes = np.unique(yt)
-    recalls = []
-    precisions = []
-    f1s = []
-    for c in classes:
-        tp = int(np.sum((yp == c) & (yt == c)))
-        fn = int(np.sum((yp != c) & (yt == c)))
-        fp = int(np.sum((yp == c) & (yt != c)))
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        recalls.append(recall); precisions.append(precision); f1s.append(f1)
-    macro_recall = float(np.mean(recalls)) if recalls else 0.0
-    macro_precision = float(np.mean(precisions)) if precisions else 0.0
-    macro_f1 = float(np.mean(f1s)) if f1s else 0.0
     return {
-        "support": support,
-        "accuracy": accuracy,
-        "macro_recall": macro_recall,
-        "macro_precision": macro_precision,
-        "macro_f1": macro_f1,
+        "tp_gaps": int(tp_gaps),
+        "fp_gaps": int(fp_gaps),
+        "n_pred_gaps": int(n_gaps),
+        "tp_points": int(tp_points),
+        "fn_points": int(fn_points),
+        "n_test_points": int(n_points),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
     }
 
-
-def run_valence_experiment_once(
-    win: int = 5,
-    k: float = 1.0,
-    trim: float = 0.1,
-    exclude_self: bool = True,
-    weighted: bool = True,
-    multi_scales: Optional[list[int]] = None,
-    min_ctx: int = 3,
-    min_votes: int = 2,
-    attr_col: str = "Attribute2",
-    valence_col: str = "Attribute3",
-) -> dict:
-    from periodic_table import generate_table, mask_table
-    df = generate_table()
-    train_df, test_df = mask_table(df, known_to_mendeleev=True)
-    train_attr = pd.to_numeric(train_df[attr_col], errors="coerce")
-    train_val = pd.to_numeric(train_df[valence_col], errors="coerce")
-    test_attr = pd.to_numeric(test_df[attr_col], errors="coerce")
-    test_val = pd.to_numeric(test_df[valence_col], errors="coerce")
-    order = np.argsort(train_attr.to_numpy())
-    sorted_vals = train_attr.to_numpy()[order]
-    outliers = robust_multiscale_gap_voting(
-        sorted_vals,
-        win=win,
-        k=k,
-        trim=trim,
-        exclude_self=exclude_self,
-        weighted=weighted,
-        multi_scales=multi_scales or [3, 7, 9],
-        min_ctx=min_ctx,
-        min_votes=min_votes,
-    )
-    thresholds = _build_thresholds_from_gaps(sorted_vals, outliers)
-    y_pred = _predict_by_bins(train_attr.to_numpy(), train_val.to_numpy(), test_attr.to_numpy(), thresholds)
-    metrics = _compute_classification_metrics(test_val.to_numpy(), y_pred)
-    metrics.update({
-        "n_thresholds": len(thresholds),
-        "n_train": int(train_df.shape[0]),
-        "n_test": int(test_df.shape[0]),
-    })
-    return metrics
-
-
-def run_valence_experiments(n_runs: int = 5, **kwargs) -> pd.DataFrame:
-    rows = []
-    for r in range(n_runs):
-        m = run_valence_experiment_once(**kwargs)
-        m["run"] = r + 1
-        rows.append(m)
-        print(f"Run {r+1}: acc={m.get('accuracy',0):.3f}, macroR={m.get('macro_recall',0):.3f}, thr={m['n_thresholds']}")
-    df = pd.DataFrame(rows)
-    summary = df[["accuracy", "macro_recall", "macro_precision", "macro_f1"]].mean().to_dict()
-    print("Summary (mean over runs):", {k: round(v, 3) for k, v in summary.items()})
-    return df
-
 def main():
-    # Run repeated experiments predicting Attribute3 (valence) from Attribute2 bins
-    run_valence_experiments(
-        n_runs=5,
-        win=5,
-        k=1.0,
-        trim=0.1,
-        exclude_self=True,
-        weighted=True,
-        multi_scales=[3, 7, 9],
-        min_ctx=3,
-        min_votes=2,
-        attr_col="Attribute2",
-        valence_col="Attribute3",
-    )
+    # Example usage on the provided training data
+    data_path = Path(__file__).parent.parent
+    from periodic_table import generate_table, mask_table
+    metrics_list = []
+    for i in range(1000):
+        df = generate_table()
+        train_df, test_df = mask_table(df)
+        series = train_df['Attribute2'].sort_values(ascending=True)
+
+
+        # result_df = robust_multiscale_gap_voting(
+        #         series,
+        #         k=1.0,
+        #         trim=0.1,
+        #         exclude_self=True,
+        #         weighted=True,
+        #         multi_scales=[3,5,7],
+        #         min_ctx=3,
+        #         min_votes=2,
+        # )
+        result_df = sliding_gap_outliers(series, win=5, exclude_self=True)
+        # Keep only outlier gaps and evaluate against held-out Attribute2
+        result_df = result_df[result_df['is_outlier']]
+        metrics = compute_gap_detection_metrics(result_df, test_df['Attribute2'], inclusive=False)
+        metrics_list.append(metrics)
+
+    metrics_df = pd.DataFrame(metrics_list)
+    print(metrics_df.mean())
+
 
 if __name__ == "__main__":
     main()

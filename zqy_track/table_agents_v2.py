@@ -4,6 +4,9 @@ import re
 import json
 import os
 import getpass
+from typing import Any, Dict, List, Optional
+import pandas as pd
+from interpolator import Interpolator
 
 class Agent(object):
 
@@ -15,37 +18,126 @@ class Agent(object):
             os.environ["BASE_URL"] = getpass.getpass("Enter BASE URL: ")
         self.key = os.environ.get("OPENAI_API_KEY") #我的key
         self.url = os.environ.get("BASE_URL")
-        self.model = 'claude-sonnet-4-20250514' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o'
+        self.model = 'claude-sonnet-4-20250514' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o', 'gpt-5'
+        self.max_retries = 3
+        self.base_delay = 2
+        self.max_delay = 30
+        self.timeout = 100
 
-    def get_LLM_response(self, prompt_msgs):    
-        # Set API key and base URL
-        client = openai.OpenAI(api_key=self.key, base_url=self.url)
-        start_time = time.time()
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=prompt_msgs,
-            timeout=100,  # 添加60秒超时
-        )
-        response_time = time.time() - start_time
-        print(f'Got response from {self.model} in {response_time:.1f} sec.')
-        answer = response.choices[0].message.content.strip()
-        return answer    
+    def _exponential_backoff(self, attempt: int) -> float:
+        delay = min(self.base_delay * (2 ** attempt), self.max_delay)
+        return delay
 
-    def get_LLM_structured_response(self, prompt_msgs):
-        client = openai.OpenAI(api_key=self.key, base_url=self.url)
-        start_time = time.time()
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=prompt_msgs,
-            response_format={
-                "type": "json_object"
-            },
-            timeout=60,  # 添加60秒超时
-        )
-        response_time = time.time() - start_time
-        print(f'Got response from {self.model} in {response_time:.1f} sec.')
-        answer = response.choices[0].message.content.strip()
-        return answer    
+    def _is_retryable_error(self, error: Exception) -> bool:
+        s = str(error).lower()
+        retryables = [
+            "timeout", "timed out", "rate limit", "overloaded", "temporarily unavailable",
+            "502", "503", "504", "gateway", "connection reset", "connection aborted",
+        ]
+        return any(r in s for r in retryables)
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        response_format: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,  # "auto", "required", or None
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        timeout: Optional[int] = None,
+        stream: bool = False,
+        extra: Optional[Dict[str, Any]] = None,
+        return_raw: bool = True,
+    ) -> Dict[str, Any]:
+        """Unified chat request supporting tools and structured output.
+
+        Returns a dict with: content, tool_calls, finish_reason, usage, response_time, response(raw).
+        """
+        client = openai.OpenAI(api_key=self.key, base_url=self.url, timeout=(timeout or self.timeout))
+        params: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if response_format is not None:
+            params["response_format"] = response_format
+        if tools is not None:
+            params["tools"] = tools
+        if tool_choice is not None:
+            params["tool_choice"] = tool_choice
+        if temperature is not None:
+            params["temperature"] = temperature
+        if top_p is not None:
+            params["top_p"] = top_p
+        if extra:
+            params.update(extra)
+
+        start = time.time()
+        last_err: Optional[Exception] = None
+        for attempt in range(self.max_retries):
+            try:
+                if stream:
+                    # Aggregate streamed deltas
+                    content_parts: List[str] = []
+                    tool_calls: List[Dict[str, Any]] = []
+                    response_obj = None
+                    for event in client.chat.completions.create(stream=True, **params):
+                        response_obj = event  # keep last event object
+                        if not event.choices:
+                            continue
+                        delta = event.choices[0].delta  # type: ignore[attr-defined]
+                        if getattr(delta, "content", None):
+                            content_parts.append(delta.content)
+                        if getattr(delta, "tool_calls", None):
+                            # Some SDKs stream tool_calls incrementally; collect as-is
+                            tool_calls.extend(delta.tool_calls)
+                    content = ("".join(content_parts)).strip()
+                    finish_reason = None
+                    usage = None
+                    response = response_obj
+                else:
+                    response = client.chat.completions.create(**params)
+                    choice = response.choices[0]
+                    msg = choice.message
+                    content = (msg.content or "").strip()
+                    tool_calls = getattr(msg, "tool_calls", None) or []
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    usage = getattr(response, "usage", None)
+
+                elapsed = time.time() - start
+                print(f'Got response from {self.model} in {elapsed:.1f} sec.')
+                return {
+                    "content": content,
+                    "tool_calls": tool_calls,
+                    "finish_reason": finish_reason,
+                    "usage": usage,
+                    "response_time": elapsed,
+                    "response": response if return_raw else None,
+                }
+            except Exception as e:
+                last_err = e
+                print(f"Attempt {attempt+1}/{self.max_retries} failed: {e}")
+                if attempt >= self.max_retries - 1 or not self._is_retryable_error(e):
+                    raise
+                delay = self._exponential_backoff(attempt)
+                time.sleep(delay)
+
+    def get_LLM_response(self, prompt_msgs, response_format: Optional[Dict[str, Any]] = None) -> str:
+        """Backward-compatible wrapper for plain or structured output.
+
+        - Pass response_format={"type": "json_object"} for JSON mode.
+        - For tools, prefer calling chat(..., tools=..., tool_choice="auto").
+        """
+        res = self.chat(prompt_msgs, response_format=response_format)
+        return res.get("content", "")
+    
+    def get_LLM_structured_response(self, prompt_msgs) -> str:
+        res = self.chat(prompt_msgs, response_format={"type": "json_object"})
+        return res.get("content", "")
+    
+    def get_LLM_tools_response(self, prompt_msgs, tools):
+        res = self.chat(prompt_msgs, tools=tools, tool_choice="required ")
+        return res.get("content", "")
     
     # 解析响应内容
     def extract_content(self, tag, text):
@@ -132,26 +224,27 @@ class AbductionAgent(Agent):
             "ascending": self.extract_content("ascending", raw_response),
             "raw_response": raw_response  # 保留原始响应以防解析失败
         }
-
-    def generate_hypothesis(self, state, attribute, history):    
+    
+    
+    def generate_hypothesis(self, state, attribute, ascending, history):    
         
         task = f"""
-        1. 识别在主属性顺序排列时其他属性是否呈现以及呈现何种周期规律
-        2. 提出最可能的虚拟元素周期律假设，使尽可能多的元素满足
-        3. 根据假设建立将所有元素填入虚拟元素周期表格的规则
-        4. 根据所建立的规则以python代码形式编写一段将元素填入虚拟周表格的函数
-        5. 要求代码根据元素属性为每个元素确定合适且唯一的表格位置(row,col)
-        6. 要求所得行(row)和列(col)必须为大于0的正整数
-        7. 要求所填表格尽量紧凑，但允许元素间存在间隔（尚未发现的元素）
-        8. 必须确保元素位置没有重叠
+        你的任务仅是确定周期表“形状”（每行/每列的长度或换行规则），以便在不改变主属性顺序的前提下，将元素依序填入表格：
+        1. 形状可以不规则（不同周期长度不同），但必须满足：按主属性{'升序' if str(ascending).lower()=='true' else '降序'}排列时，沿着你定义的遍历顺序（例如逐行从左到右、按行依次向下），主属性值单调变化（不逆序）。
+        2. 请论证该形状如何使“同一列的元素具有较相似的属性”，以及“同一行呈现某种周期性的变化”。
+        3. 结合当前数据（注意其中一些 NewElem 的主属性为字符串范围如 "lo~hi"），明确给出你的形状描述（如各行长度列表，或可计算的换行规则）。
+        4. 根据该形状，给出将所有元素映射到 (row, col) 的规则，且行列均为正整数，且位置不重叠。
         """
 
         code_requrement = f"""
         1. 输入: 
-            current_df: DataFrame # 包含元素所有属性以及当前所在表格的行(row)和列(col)
-        2. 输出：
-            results: [(elem_name, row, col), ...] # 所有元素位置的Python list, rol 和 col 为正整数
-        3. 注意导入函数所需的package
+            current_df: DataFrame  # 包含全部元素属性以及当前所在表格的行(row)和列(col), index_col 是Elem 名称。
+        2. 约束：
+            - 使用主属性 {attribute} 且按 {'升序' if str(ascending).lower()=='true' else '降序'} 排列进行放置；若主属性为范围字符串 "lo~hi"，请使用 (lo+hi)/2 的均值参与排序；其他不可解析值跳到队尾。
+            - 仅根据你确定的“形状”与顺序分配 (row, col)，不得与已分配位置重叠；所有位置均为正整数；可存在空位（尚未发现的元素）。
+            - 代码需自包含、可直接运行；不要调用外部未定义函数；必要时可导入基础库（如 pandas、numpy、math）。
+        3. 输出：
+            results: [(elem_name, row, col), ...]  # Python 列表，所有元素的位置，row/col 为正整数, 其中elem_name 与current_df 中的name对应。
         """
 
         user_prompt = f"""
@@ -165,9 +258,9 @@ class AbductionAgent(Agent):
         {state}
         </state>
 
-        当前选择的主属性为：
+        当前选择的主属性及其顺序为：
         <attribute>
-        {attribute}
+        {attribute}, ascending={ascending}
         </attribute>
 
         任务要求：
@@ -187,16 +280,16 @@ class AbductionAgent(Agent):
 
         你的回复必须严格遵循以下格式：
         <reasoning>
-        此处给出推理过程
+        给出确定“形状”的思路、依据和对列相似性/行周期性的解释；说明遍历顺序与保持主属性单调的方式。
         </reasoning>
 
         <hypothesis>
-        1. 较为精简的虚拟元素周期律假设
-        2. 将元素填入虚拟元素周期表的规则
+        1. 周期表形状的明确描述（如每行列数/换行规则）
+        2. 逐元素放置的规则（保证主属性单调、无重叠、尽量紧凑）
         </hypothesis>
 
         <code>
-        此处给出函数代码
+        放置所有元素位置的函数代码
         </code>
 
         <func_name>
@@ -221,6 +314,73 @@ class AbductionAgent(Agent):
             "raw_response": raw_response  # 保留原始响应以防解析失败
         }
 
+    def select_gap_candidates(self, state, main_attribute, ascending, outlier_table_text, n: int = 10):
+        """
+        基于多尺度空隙投票的候选表（仅包含 is_outlier 的行的字符串表示），选择最可能的 n 个空位。
+
+        输入：
+        - state: 当前表格文本（包含所有元素、属性、位置表格）
+        - main_attribute: 主属性名
+        - ascending: 是否升序
+        - outlier_table_text: 候选空位文本表（包含 gap_index,left_elem,right_elem 等列）
+        - n: 要选的空位数
+
+        输出：
+        - 一个 CSV 风格的段落：gap_index,left_elem,right_elem，每行一个记录，最多 n 行。
+        """
+        task = f"""
+        1. 阅读候选空位表（仅包含 is_outlier=True 的条目），优先选择分数高、票数多、位于已知元素密集区的空位。
+        2. 若候选数量少于 {n}，请结合主属性 {main_attribute} 的排序方向（ascending={ascending}）与当前表格分布，自行推断补充分布合理且不重复的空位（与已列候选不同）。
+        3. 输出不超过 {n} 个，避免重复，尽量覆盖不同区段。
+        4. 输出严格按 CSV 三列：gap_index,left_elem,right_elem；若为自行推断的额外空位，gap_index 可填 NA。
+        """
+
+        user_prompt = f"""
+        当前虚拟元素周期表状态：
+        <state>
+        {state}
+        </state>
+
+        候选空位（由多尺度空隙投票筛出的 is_outlier 条目）：
+        <outlier_table>
+        {outlier_table_text}
+        </outlier_table>
+
+        任务要求：
+        <task>
+        {task}
+        </task>
+
+        输出格式：
+        <top_gaps>
+        gap_index,left_elem,right_elem
+        ...（不超过 {n} 行）
+        </top_gaps>
+        """
+
+        prompt_msgs = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        raw_response = self.get_LLM_response(prompt_msgs)
+
+        top_gaps_text = self.extract_content("top_gaps", raw_response) or ""
+        selected = []
+        for line in top_gaps_text.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("gap_index"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 3:
+                continue
+            gi, le, re = parts
+            selected.append((gi, le, re))
+
+        return {
+            "selected": selected[:n],
+            "raw_response": raw_response,
+        }
+
 class DeductionAgent(Agent):
     
     def __init__(self):
@@ -233,26 +393,38 @@ class DeductionAgent(Agent):
         1. 元素表格，包括元素名称（无任何实际含义）、元素属性、元素在虚拟周期表格的位置（若已被填入）
         2. 以虚拟元素表格形式呈现的所有已被填入表格元素属性值
         """
+    
+    def predict_numeric(self, table):
+        try :
+            for attr in table.aset.attributes:
+                if attr.numeric_type == 'continuous':
+                    itp = Interpolator(table.elem_df, attr.name)
+                    for idx, row in table.elem_df.iterrows():
+                        if row.name.startswith('NewElem'):
+                            table.elem_df.at[idx, attr.name] = itp.predict_at(row['row'], row['col'])
+        except Exception as e:
+            print(f"Error predicting numeric attribute: {e}")
 
-    def predict_elements(self, state, hypothesis, code, history,n=10):
+
+    def predict_discrete_categorical_attribute(self, state, hypothesis, history, n=10):
 
         task = f"""
-        1. 根据提供的虚拟元素周期律假设以及当前的元素周期表状态，提出{n}个最有可能的潜在未知元素，元素命名为NewElem1, NewElem2, ...
-        2. 给出所有潜在未知元素在元素周期表中的行(row)和列(col)，尽量在已知元素附近
-        3. 必须确保未知元素之间以及与已知元素在元素周期表的位置没有重叠
-        4. 根据提供的虚拟元素周期律假设和填表函数代码（输入为元素属性，输出为表中位置），写出其对应的逆函数代码
-        5. 逆函数要求以潜在元素在元素周期表中位置为输入，输出其所有属性值
-        6. 注意元素属性值的变量类型，可能是数字也可能是字符串 
+        1. 根据提供的虚拟元素周期律假设，写出一个预测“离散或类别属性”的函数。
+        2. 函数必须严格使用如下签名：def predict_element_attributes(current_df: pd.DataFrame) -> list
+           - 输入 current_df 为完整表（含已知与 NewElem），包含列：所有属性 + row + col
+           - 输出 results 为 Python 列表：[(elem_name, attr1, attr2, ..., row, col), ...]
+           - 已有的数值/字符串属性若已给定则直接复制；仅对离散/类别属性做规则推断
+        3. 注意元素属性值的变量类型，可能是数字也可能是字符串。 
+        4. 不得调用外部未定义的函数；可导入 pandas/numpy/math。
         """
 
         code_requrement = f"""
         1. 输入: 
-            element_positions: [(elem_name, row, col), ...] # 所有元素位置的Python list
-            current_df: 当前元素表格DataFrame
+            current_df: 当前元素表格DataFrame（index 为元素名，含所有属性及 row/col）
         2. 输出：
-            results: [(elem_name, attr1, attr2, ..., row, col), ...] # 所有元素属性与位置的Python list
-        3. 注意导入函数所需的package
-        4. 注意不要调用外部未定义的函数
+            results: [(elem_name, attr1, attr2, ..., row, col), ...] # 所有元素属性值与位置的Python list
+        3. 函数签名必须是：predict_element_attributes(current_df)
+        4. 不要依赖外部未定义函数；如需库请在代码顶部显式 import
         """
 
         user_prompt = f"""
@@ -272,15 +444,11 @@ class DeductionAgent(Agent):
         {hypothesis}
         </hypothesis>
 
-        已知填表函数为：
-        <code>
-        {code}
-        </code>
 
-        已知逆函数为：
-        <inverse_code>
+        已知预测函数为：
+        <code>
         {history.records[-1]['deduction_code'] if len(history.records) > 1 else ''}
-        </inverse_code>
+        </code>
 
         任务要求：
         <task>
@@ -298,15 +466,10 @@ class DeductionAgent(Agent):
         此处给出推理过程
         </reasoning>
 
-        <new_elem>
-        NewElem1, row1, col1
-        NewElem2, row2, col2
-        ... 
-        </new_elem>
 
-        <inverse_code>
+        <code>
         此处给出代码
-        </inverse_code>
+        </code>
 
         <func_name>
         将上述代码中函数的名称写在此处
@@ -321,23 +484,13 @@ class DeductionAgent(Agent):
         
         raw_response = self.get_LLM_response(prompt_msgs)
 
-        # 提取并处理new_elem
-        new_elem_text = self.extract_content("new_elem", raw_response)
-        new_elems_posi = []
-        if new_elem_text:
-            for line in new_elem_text.split('\n'):
-                if line.strip():
-                    parts = [x.strip() for x in line.split(',')]
-                    if len(parts) == 3:
-                        elem, row, col = parts
-                        new_elems_posi.append((elem, int(row), int(col)))
+        func_name = self.extract_content("func_name", raw_response) or "predict_element_attributes"
 
         return {
             "task": task,
             "reasoning": self.extract_content("reasoning", raw_response),
-            "new_elems_posi": new_elems_posi,
-            "inverse_code": self.extract_content("inverse_code", raw_response),
-            "func_name": self.extract_content("func_name", raw_response),
+            "code": self.extract_content("code", raw_response),
+            "func_name": func_name,
             "raw_response": raw_response
         }
 
