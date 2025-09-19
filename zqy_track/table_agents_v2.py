@@ -18,7 +18,7 @@ class Agent(object):
             os.environ["BASE_URL"] = getpass.getpass("Enter BASE URL: ")
         self.key = os.environ.get("OPENAI_API_KEY") #我的key
         self.url = os.environ.get("BASE_URL")
-        self.model = 'claude-sonnet-4-20250514' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o', 'gpt-5'
+        self.model = 'claude-sonnet-4-20250514' # 'deepseek-r1', 'deepseek-v3', 'o1', 'gpt-4o', 'gpt-5', 'claude-sonnet-4-20250514'
         self.max_retries = 3
         self.base_delay = 2
         self.max_delay = 30
@@ -513,12 +513,13 @@ class InductionAgent(Agent):
             'C': 'change the main attribute' 
         }
 
-    def evaluate_hypothesis(self, state, hypothesis, matched_elem_str, match_rate):
+    def evaluate_hypothesis(self, state, hypothesis, matched_elem_str, match_rate, minority_report):
         task = """
         1. 评价当前的虚拟元素周期表中所有元素的各属性是否呈现明显的周期规律
         2. 评价所预测潜在元素（以NewElem命名）的与测试集匹配情况，例如导致有不匹配的元素的可能原因
-        3. 是否需要修改假设，若需要应该如何修改，包括是否需要更换主元素以及修改假设内容
-        4. 在提供的选项中选择一个决策
+        3. 评价虚拟元素周期表的列一致性，假设元素周期表排布合理，列一致性越高。
+        4. 是否需要修改假设，若需要应该如何修改，包括是否需要更换主元素以及修改假设内容
+        5. 在提供的选项中选择一个决策
         """
 
         user_prompt = f"""
@@ -543,6 +544,11 @@ class InductionAgent(Agent):
         匹配成功率:
         {match_rate}
         </new_elem>
+
+        虚拟元素周期表的列一致性评估
+        <minority_report>
+        {minority_report}
+        </minority_report>
 
         任务要求：
         <task>

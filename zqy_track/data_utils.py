@@ -9,7 +9,7 @@ from viz_utils import create_periodic_table_plot
 from table_agents_v2 import RecordAgent
 import pandas as pd
 from dataclasses import dataclass
-from typing import Optional, Iterable, Dict, List, Tuple
+from typing import Optional, Iterable, Dict, List, Tuple, Any
 import numpy as np
 from pandas.api.types import is_numeric_dtype
 
@@ -368,6 +368,76 @@ class AttributeSet:
         if total == 0:
             return {k: 0.0 for k in sizes.keys()}
         return {k: (v / total) for k, v in sizes.items()}
+
+
+@dataclass(frozen=True)
+class MinorityReport:
+    """Summary statistics for a discrete column when a clear majority exists."""
+    majority_value: Any
+    majority_rate: float
+    minority_rate: float
+    minority_object: Tuple[Tuple[Any, Any], ...]
+
+
+def minority_report_from_series(series: pd.Series, top_k: Optional[int] = None) -> Optional[MinorityReport]:
+    """Compute a ``MinorityReport`` from a pandas Series if a >51% majority exists."""
+    if series is None:
+        return None
+
+    series = series.dropna()
+    if series.empty:
+        return None
+
+    share = series.value_counts(normalize=True, dropna=True)
+    if share.empty:
+        return None
+
+    majority_value = share.idxmax()
+    majority_rate = float(share.loc[majority_value])
+    if majority_rate <= 0.51:
+        return None
+
+    if len(share) == 1:
+        return None
+
+    minority_share = share.drop(index=majority_value)
+    minority_rate = float(minority_share.sum())
+
+    sorted_minority = minority_share.sort_values(ascending=False)
+    if top_k is not None:
+        if top_k <= 0:
+            selected_categories = set()
+        else:
+            selected_categories = set(sorted_minority.head(top_k).index.tolist())
+    else:
+        selected_categories = set(sorted_minority.index.tolist())
+
+    minority_object = tuple(
+        (idx, val)
+        for idx, val in series.items()
+        if val in selected_categories
+    )
+
+    return MinorityReport(
+        majority_value=majority_value,
+        majority_rate=majority_rate,
+        minority_rate=minority_rate,
+        minority_object=minority_object,
+    )
+def calculate_minority_rate(
+    table_state,
+    column: str = "col",
+    top_k: Optional[int] = None,
+) -> Optional[MinorityReport]:
+    """Return minority details for a discrete column when a >51% majority is present."""
+    elem_df = getattr(table_state, "elem_df", None)
+    if elem_df is None:
+        raise AttributeError("table_state must expose an 'elem_df' attribute")
+
+    if column not in elem_df.columns:
+        raise KeyError(f"Column '{column}' not found in elem_df")
+
+    return minority_report_from_series(elem_df[column], top_k=top_k)
 
 def execute_function(code_str, func_name, df):
     namespace = {}

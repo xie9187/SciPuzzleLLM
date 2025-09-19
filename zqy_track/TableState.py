@@ -1,7 +1,7 @@
-from data_utils import AttributeSet
+from data_utils import AttributeSet, MinorityReport, minority_report_from_series
 import pandas as pd
 import numpy as np
-
+from typing import Optional, List, Dict, Any
 class TableState(object):
     def __init__(self, elem_df, test_df):
         super(TableState, self).__init__()
@@ -253,3 +253,62 @@ class TableState(object):
             state_str += f'{attr} of current elements in virtual periodic table\n'
             state_str += self.att_table(attr) + '\n\n'
         return state_str
+    
+    def calculate_minority_rate(
+        self,
+        top_k: Optional[int] = None,
+    ) -> Dict[Any, Dict[str, MinorityReport]]:
+        """Return minority reports for discrete/categorical attributes grouped by table column."""
+        if self.aset is None:
+            raise ValueError("Attribute set is not initialized; call infer_aset first.")
+
+        if "col" not in self.elem_df.columns:
+            raise KeyError("elem_df must contain a 'col' column")
+
+        reports: Dict[Any, Dict[str, MinorityReport]] = {}
+        grouped = self.elem_df.dropna(subset=["col"]).groupby("col")
+
+        for col_value, group_df in grouped:
+            attr_reports: Dict[str, MinorityReport] = {}
+            for attr in self.aset.attributes:
+                if attr.name not in group_df.columns:
+                    continue
+                if attr.name in {"col", "row"}:
+                    continue
+                if attr.kind == "categorical" or (attr.kind == "numeric" and attr.numeric_type == "discrete"):
+                    report = minority_report_from_series(group_df[attr.name], top_k=top_k)
+                    if report is not None:
+                        attr_reports[attr.name] = report
+            if attr_reports:
+                reports[col_value] = attr_reports
+
+        return reports
+
+
+    def summarize_minority_report(self, top_k: Optional[int] = None) -> str:
+        """Render the minority distribution report in a compact, LLM-friendly text format."""
+        reports = self.calculate_minority_rate(top_k=top_k)
+        if not reports:
+            return "No column exhibits a clear majority/minority pattern."
+
+        def _sort_key(value):
+            if isinstance(value, (int, float)):
+                return (0, float(value))
+            return (1, str(value))
+
+        lines: List[str] = []
+        for col_value in sorted(reports.keys(), key=_sort_key):
+            attr_reports = reports[col_value]
+            if not attr_reports:
+                continue
+            lines.append(f"col={col_value}:")
+            for attr_name, report in attr_reports.items():
+                if report.minority_object:
+                    entries = "; ".join(f"{idx}: {val}" for idx, val in report.minority_object)
+                else:
+                    entries = "None"
+                lines.append(
+                    f"  - {attr_name}: majority={report.majority_value} ({report.majority_rate:.1%}), "
+                    f"minority share={report.minority_rate:.1%}, minority entries={entries}"
+                )
+        return "\n".join(lines) if lines else "No column exhibits a clear majority/minority pattern."

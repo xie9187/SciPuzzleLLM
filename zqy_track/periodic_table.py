@@ -37,8 +37,11 @@ def generate_table():
     test = []
     for i in range(n_sample):
         start = i * group_size
-        end = (i+1) * group_size if i < n_sample - 1 else n_elem  
-        test.append(random.choice(range(start, end)))
+        end = (i + 1) * group_size if i < n_sample - 1 else n_elem
+        lo = start + 1
+        hi = end
+        test.append(random.randint(lo, hi))
+
     
     for Z in range(1, n_elem+1):
         e = Element.from_Z(Z)
@@ -294,7 +297,7 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2, p
         print(f"填充预测值到表时出错: {e}")
 
     # 显示执行详情
-    print(f"✅ 反向代码执行成功，尝试次数: {execution_result['attempts']}")
+    print(f"反向代码执行成功，尝试次数: {execution_result['attempts']}")
 
     
     success = True
@@ -305,7 +308,9 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2, p
     print_and_enter(deduct_code)
 
     state = table.get_complete_state()
-    print(state)
+    minority_summary = table.summarize_minority_report()
+    print("Minority report:")
+    print_and_enter(minority_summary)
 
     # induction
     print(logger.new_part('Induction Process'))
@@ -325,7 +330,13 @@ def hypo_gen_and_eval(table, agents, history, decision, logger, max_retries=2, p
     print_and_enter(f'Match Rate: {match_rate}')
     print_and_enter(f'eval score:\n{eval_score.__str__()}')
     
-    eval_result = in_agent.evaluate_hypothesis(state, hypothesis, matched_elem_str, eval_score.__str__())
+    eval_result = in_agent.evaluate_hypothesis(
+        state=state,
+        hypothesis=hypothesis,
+        matched_elem_str=matched_elem_str,
+        match_rate=eval_score.__str__(),
+        minority_report=minority_summary,
+    )
     evaluation = eval_result['evaluation']
     decision = eval_result['decision']
 
@@ -403,7 +414,7 @@ if __name__ == '__main__':
     # history.load_records_from_log(join(data_path, 'logs', '2025-07-04-13-17-03'), iteration=1)
     
     logger = Logger(join(data_path, 'logs', '30x10x5attribute'))
-    max_iter = 10
+    max_iter = 5
     max_retries = 3
     decision = 'C'
     patience = 5
